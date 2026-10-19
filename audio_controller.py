@@ -731,14 +731,15 @@ class AudioController:
 
     state = self.device.get_state() if self.device is not None else {}
 
+    # USB|Casco|Activo|Own|Manual|Con&Com
     message = (
-      f"[DBG] {reason} | "
-      f"USB={int(bool(state.get('headset_dongle_connected')))} "
-      f"Casco={int(bool(state.get('headset_connected')))} "
-      f"Activo={int(bool(state.get('headset_active')))} "
-      f"Own={int(self._output_owned)} "
-      f"Manual={int(self._output_override)} | "
-      f"Con={console} Com={comms}"
+      f"[DBG] {reason} => "
+      f"{int(bool(state.get('headset_dongle_connected')))}|"
+      f"{int(bool(state.get('headset_connected')))}|"
+      f"{int(bool(state.get('headset_active')))}|"
+      f"{int(self._output_owned)}|"
+      f"{int(self._output_override)}|"
+      f"{console}&{comms}"
     )
 
     self._log(f"audio_debug:{reason}", message)

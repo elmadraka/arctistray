@@ -1,7 +1,5 @@
 import json
 import os
-import tempfile
-
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,13 +8,10 @@ APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ArctisTray"
 CONFIG_FILE = APP_DIR / "config.json"
 
 DEFAULT_CONFIG = {
-  "output_mode": "automatic",
-  "fixed_output": None,
-  "last_output": None,
-  "change_input": False,
-  "input_mode": "automatic",
-  "fixed_input": None,
-  "startup": False
+  "output_fixed": None,
+  "input_change_enabled": False,
+  "input_fixed": None,
+  "startup_enabled": False
 }
 
 
@@ -25,59 +20,76 @@ class ConfigManager:
     self.data = deepcopy(DEFAULT_CONFIG)
     self.load()
 
+  def _validate_value(self, key, value):
+    if key not in DEFAULT_CONFIG:
+      raise KeyError(f"Unknown key: {key}")
+
+    if key in ("input_change_enabled", "startup_enabled"):
+      if not isinstance(value, bool):
+        raise ValueError(f"Invalid {key} value.")
+
+    elif key in ("output_fixed", "input_fixed"):
+      if value is not None and not isinstance(value, str):
+        raise ValueError(f"Invalid {key} value.")
+
+    return value
+
+  def _normalize(self, data):
+    normalized = deepcopy(DEFAULT_CONFIG)
+
+    for key, value in data.items():
+      if key not in DEFAULT_CONFIG:
+        continue
+
+      try:
+        normalized[key] = self._validate_value(key, value)
+      except ValueError:
+        pass
+
+    return normalized
+
   def load(self):
     try:
       with CONFIG_FILE.open("r", encoding="utf-8") as file:
         saved = json.load(file)
 
-      if isinstance(saved, dict):
-        self.data.update({
-          key: value
-          for key, value in saved.items()
-          if key in DEFAULT_CONFIG
-        })
+      if not isinstance(saved, dict):
+        return
 
-      if self.data["output_mode"] not in ("automatic", "fixed"):
-        self.data["output_mode"] = "automatic"
+      self.data = self._normalize(saved)
 
-      if self.data["input_mode"] not in ("automatic", "fixed"):
-        self.data["input_mode"] = "automatic"
-
-      if not isinstance(self.data["change_input"], bool):
-        self.data["change_input"] = False
-
-      if not isinstance(self.data["startup"], bool):
-        self.data["startup"] = False
-
-    except FileNotFoundError:
-      self.save()
-    except (json.JSONDecodeError, OSError):
-      self.data = deepcopy(DEFAULT_CONFIG)
-      self.save()
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+      pass
 
   def save(self):
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
-    fd, filename = tempfile.mkstemp(
-      dir=APP_DIR,
-      suffix=".tmp"
-    )
-
-    try:
-      with os.fdopen(fd, "w", encoding="utf-8") as file:
-        json.dump(self.data, file, indent=2, ensure_ascii=False)
-
-      os.replace(filename, CONFIG_FILE)
-    finally:
-      if os.path.exists(filename):
-        os.remove(filename)
+    with CONFIG_FILE.open("w", encoding="utf-8") as file:
+      json.dump(self.data, file, indent=2, ensure_ascii=False)
 
   def get(self, key):
-    return self.data.get(key, DEFAULT_CONFIG.get(key))
-
-  def set(self, key, value):
     if key not in DEFAULT_CONFIG:
-      raise KeyError(f"Configuración desconocida: {key}")
+      raise KeyError(f"Unknown key: {key}")
+
+    return self.data[key]
+  
+  def _set(self, key, value):
+    self._validate_value(key, value)
+
+    if self.data[key] == value:
+      return
 
     self.data[key] = value
     self.save()
+
+  def set_fixed_output(self, device_id):
+    self._set("output_fixed", device_id)
+
+  def set_fixed_input(self, device_id):
+    self._set("input_fixed", device_id)
+
+  def set_input_change_enabled(self, enabled):
+    self._set("input_change_enabled", enabled)
+
+  def set_startup_enabled(self, enabled):
+    self._set("startup_enabled", enabled)

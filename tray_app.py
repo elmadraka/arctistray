@@ -171,11 +171,7 @@ class ArctisTray:
         self._start_output_refresh(force=True)
 
   def change_output_configuration(self, mode, device_id=None):
-    try:
-      if device_id is not None:
-        self.config.set("fixed_output", device_id)
-
-      self.config.set("output_mode", mode)
+    self.config.set_fixed_output(device_id)
 
     except Exception as exc:
       print(f"[CONFIG] Error guardando la configuración: {exc}")
