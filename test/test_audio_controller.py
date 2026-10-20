@@ -334,5 +334,191 @@ class AudioControllerTests(unittest.TestCase):
     self.assertTrue(self.controller._tasks.empty())
 
 
+  def test_restore_input_restores_roles_changed_by_controller(self):
+    self.controller.config = {"input_change_enabled": True}
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "previous-console-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-console-input"},
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "arctis-input",
+      "communications": "arctis-input",
+    }
+
+    self.controller._restore_flow("input")
+
+    self.assertEqual(
+      self.discovery.defaults["input"],
+      {
+        "console": "previous-console-input",
+        "communications": "previous-communications-input",
+      },
+    )
+    self.assertEqual(
+      self.discovery.set_default_calls,
+      [
+        (
+          "input",
+          {
+            "console": "previous-console-input",
+            "communications": "previous-communications-input",
+          },
+        ),
+      ],
+    )
+    self.assertFalse(self.controller._input_owned)
+    self.assertIsNone(self.controller._activated_input)
+
+  def test_restore_input_changes_only_roles_owned_by_controller(self):
+    self.controller.config = {"input_change_enabled": True}
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "previous-console-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {"console"}
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-console-input"},
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "arctis-input",
+      "communications": "arctis-input",
+    }
+
+    self.controller._restore_flow("input")
+
+    self.assertEqual(
+      self.discovery.defaults["input"],
+      {
+        "console": "previous-console-input",
+        "communications": "arctis-input",
+      },
+    )
+    self.assertEqual(
+      self.discovery.set_default_calls,
+      [("input", {"console": "previous-console-input"})],
+    )
+
+  def test_restore_input_does_not_overwrite_later_manual_change(self):
+    self.controller.config = {"input_change_enabled": True}
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "previous-console-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-console-input"},
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+      {"id": "user-selected-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "user-selected-input",
+      "communications": "arctis-input",
+    }
+
+    self.controller._restore_flow("input")
+
+    self.assertEqual(
+      self.discovery.defaults["input"],
+      {
+        "console": "user-selected-input",
+        "communications": "previous-communications-input",
+      },
+    )
+    self.assertEqual(
+      self.discovery.set_default_calls,
+      [
+        (
+          "input",
+          {"communications": "previous-communications-input"},
+        ),
+      ],
+    )
+
+  def test_restore_input_skips_previous_endpoint_missing_from_catalog(self):
+    self.controller.config = {"input_change_enabled": True}
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "disconnected-previous-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {"console"}
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "arctis-input",
+      "communications": "arctis-input",
+    }
+
+    self.controller._restore_flow("input")
+
+    self.assertEqual(self.discovery.set_default_calls, [])
+    self.assertEqual(
+      self.discovery.defaults["input"]["console"],
+      "arctis-input",
+    )
+
+  def test_disconnect_restores_owned_input_when_input_changes_are_enabled(self):
+    self.controller.config = {"input_change_enabled": True}
+    self.controller.bind_device(self.device)
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "previous-console-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-console-input"},
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "arctis-input",
+      "communications": "arctis-input",
+    }
+    self.device.headset_connected = False
+
+    self.controller._deactivate()
+
+    self.assertEqual(
+      self.discovery.defaults["input"],
+      {
+        "console": "previous-console-input",
+        "communications": "previous-communications-input",
+      },
+    )
+    self.assertFalse(self.controller._input_owned)
+    self.assertIsNone(self.controller._activated_input)
+    self.assertIn(False, self.device.active_states)
+
+
+
 if __name__ == "__main__":
   unittest.main()

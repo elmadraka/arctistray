@@ -676,7 +676,7 @@ class AudioController:
 
     current = self._get_default_devices(flow)
     pending = {}
-
+    
     for role in tuple(changed_roles):
       current_id = current.get(role)
       target_id = target.get(role)
@@ -685,6 +685,7 @@ class AudioController:
       if (
         current_id
         and target_id
+        and self._catalog_contains(flow, target_id)
         and current_id.casefold() == headset_id.casefold()
         and current_id.casefold() != target_id.casefold()
       ):
