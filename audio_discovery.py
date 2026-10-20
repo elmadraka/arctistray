@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections import defaultdict
+from device_factory import get_protocol
 
 import comtypes
 from pycaw.callbacks import MMNotificationClient
@@ -17,12 +18,12 @@ POWERSHELL_SCRIPT = r"""
 $ErrorActionPreference = 'SilentlyContinue'
 
 $receivers = @(Get-PnpDevice -Class USB | Where-Object {
-  $_.InstanceId -match '^USB\\VID_1038&PID_220E\\' -and
+  $_.InstanceId -match '^USB\\VID___USB_VENDOR_ID__&PID___USB_PRODUCT_ID__\\' -and
   $_.Status -eq 'OK'
 })
 
 $interfaces = @(Get-PnpDevice -Class MEDIA | Where-Object {
-  $_.InstanceId -match '^USB\\VID_1038&PID_220E&MI_00\\' -and
+  $_.InstanceId -match '^USB\\VID___USB_VENDOR_ID__&PID___USB_PRODUCT_ID__&MI_00\\' -and
   $_.Status -eq 'OK'
 })
 
@@ -73,6 +74,19 @@ foreach ($device in $endpoints) {
 }
 """
 
+def _build_powershell_script():
+    protocol = get_protocol()
+
+    replacements = {
+        "__USB_VENDOR_ID__": f"{protocol.USB_VENDOR_ID:04X}",
+        "__USB_PRODUCT_ID__": f"{protocol.USB_PRODUCT_ID:04X}",
+    }
+
+    script = POWERSHELL_SCRIPT
+    for placeholder, value in replacements.items():
+        script = script.replace(placeholder, value)
+
+    return script
 
 def normalize(value):
     """Normalize a device identifier or GUID for comparisons."""
@@ -222,7 +236,7 @@ class AudioDiscovery:
     def get_pnp_data(self):
         """Return receiver, audio-interface, and endpoint PnP records."""
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", POWERSHELL_SCRIPT],
+            ["powershell.exe", "-NoProfile", "-Command", _build_powershell_script()],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -611,14 +625,18 @@ class AudioDiscovery:
                       refresh=False,
                   )
 
-              if refresh_pending:
-                  try:
-                      self._refresh()
-                  except Exception as exc:
-                      self._emit("discovery_error", {"error": str(exc)})
+              if stop_requested or self._stop_event.is_set():
+                break
 
-              if stop_requested:
-                  break
+              if refresh_pending:
+                try:
+                  self._refresh()
+                except Exception as exc:
+                  if not self._stop_event.is_set():
+                    self._emit("discovery_error", {"error": str(exc)})
+
+              if self._stop_event.is_set():
+                break
         except Exception as exc:
             with self._condition:
                 self._last_error = str(exc)
