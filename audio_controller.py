@@ -554,7 +554,6 @@ class AudioController:
     if not self._headset_is_ready():
       return
 
-    # If the user selects Arctis again, clear the manual override.
     if headset_id and all(
       value is not None and value.casefold() == headset_id.casefold()
       for value in current.values()
@@ -562,13 +561,25 @@ class AudioController:
       with self._state_lock:
         if self._output_override:
           self._output_override = False
-          self._output_changed_roles.clear()
-          self._output_owned = True
-          self._activated_output = headset_id
+          self._output_changed_roles = {
+            role
+            for role, previous_id in (self._output_previous or {}).items()
+            if previous_id
+            and previous_id.casefold() != headset_id.casefold()
+            and current.get(role)
+            and current[role].casefold() == headset_id.casefold()
+          }
+          self._output_owned = bool(self._output_changed_roles)
+          self._activated_output = (
+            headset_id if self._output_owned else None
+          )
 
       self._set_active_state(True)
       self._activate_input_if_enabled()
-      self._log_audio_state("Arctis selected manually")
+
+      if self._output_override is False and self._output_owned:
+        self._log_audio_state("output control resumed")
+
       return
 
     # Ignore notifications when the controller does not own the output.
