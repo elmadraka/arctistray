@@ -65,52 +65,22 @@ class AudioController:
     if self._discovery_listeners_registered:
       return
 
-    self.discovery.add_listener(
-      "monitoring_started",
-      self._on_discovery_monitoring_started,
-    )
-    self.discovery.add_listener(
-      "monitoring_stopped",
-      self._on_discovery_monitoring_stopped,
-    )
-    self.discovery.add_listener(
-      "default_device_changed",
-      self._on_default_device_changed,
-    )
-    self.discovery.add_listener(
-      "catalog_changed",
-      self._on_catalog_changed,
-    )
-    self.discovery.add_listener(
-      "discovery_error",
-      self._on_discovery_error,
-    )
+    self.discovery.add_listener("monitoring_started", self._on_discovery_monitoring_started)
+    self.discovery.add_listener("monitoring_stopped", self._on_discovery_monitoring_stopped)
+    self.discovery.add_listener("default_device_changed", self._on_default_device_changed)
+    self.discovery.add_listener("catalog_changed", self._on_catalog_changed)
+    self.discovery.add_listener("discovery_error", self._on_discovery_error)
     self._discovery_listeners_registered = True
 
   def _unregister_discovery_listeners(self):
     if not self._discovery_listeners_registered:
       return
 
-    self.discovery.remove_listener(
-      "monitoring_started",
-      self._on_discovery_monitoring_started,
-    )
-    self.discovery.remove_listener(
-      "monitoring_stopped",
-      self._on_discovery_monitoring_stopped,
-    )
-    self.discovery.remove_listener(
-      "default_device_changed",
-      self._on_default_device_changed,
-    )
-    self.discovery.remove_listener(
-      "catalog_changed",
-      self._on_catalog_changed,
-    )
-    self.discovery.remove_listener(
-      "discovery_error",
-      self._on_discovery_error,
-    )
+    self.discovery.remove_listener("monitoring_started", self._on_discovery_monitoring_started)
+    self.discovery.remove_listener("monitoring_stopped", self._on_discovery_monitoring_stopped)
+    self.discovery.remove_listener("default_device_changed", self._on_default_device_changed)
+    self.discovery.remove_listener("catalog_changed", self._on_catalog_changed)
+    self.discovery.remove_listener("discovery_error", self._on_discovery_error)
     self._discovery_listeners_registered = False
 
   def _on_discovery_monitoring_started(self, discovery, **payload):
@@ -154,18 +124,9 @@ class AudioController:
       raise RuntimeError("A device is already bound.")
 
     self.device = device
-    device.add_listener(
-      "headset_connected",
-      self._on_headset_connected,
-    )
-    device.add_listener(
-      "headset_disconnected",
-      self._on_headset_disconnected,
-    )
-    device.add_listener(
-      "headset_dongle_disconnected",
-      self._on_dongle_disconnected,
-    )
+    device.add_listener("headset_connected", self._on_headset_connected)
+    device.add_listener("headset_disconnected", self._on_headset_disconnected)
+    device.add_listener("headset_dongle_disconnected", self._on_dongle_disconnected)
 
   def start(self):
     if self.device is None:
@@ -226,18 +187,9 @@ class AudioController:
     self._discovery_monitor_ready = False
 
     if self.device is not None:
-      self.device.remove_listener(
-        "headset_connected",
-        self._on_headset_connected,
-      )
-      self.device.remove_listener(
-        "headset_disconnected",
-        self._on_headset_disconnected,
-      )
-      self.device.remove_listener(
-        "headset_dongle_disconnected",
-        self._on_dongle_disconnected,
-      )
+      self.device.remove_listener("headset_connected", self._on_headset_connected)
+      self.device.remove_listener("headset_disconnected", self._on_headset_disconnected)
+      self.device.remove_listener("headset_dongle_disconnected", self._on_dongle_disconnected)
       self.device = None
 
     if not stopped:
@@ -397,18 +349,10 @@ class AudioController:
           changed_roles.add(role)
 
   def set_default_outputs(self, outputs, changed_roles=None):
-    self._set_default_devices(
-      "output",
-      outputs,
-      changed_roles=changed_roles,
-    )
+    self._set_default_devices("output", outputs, changed_roles=changed_roles)
 
   def set_default_inputs(self, inputs, changed_roles=None):
-    self._set_default_devices(
-      "input",
-      inputs,
-      changed_roles=changed_roles,
-    )
+    self._set_default_devices("input", inputs, changed_roles=changed_roles)
 
   def is_output_default(self, device_id):
     if not device_id:
@@ -437,9 +381,7 @@ class AudioController:
     return self.config.get("input_fixed") if self.config else None
 
   def _input_change_enabled(self):
-    return bool(
-      self.config and self.config.get("input_change_enabled")
-    )
+    return bool(self.config and self.config.get("input_change_enabled"))
 
   # ------------------------------------------------------------------
   # Activation
@@ -478,10 +420,7 @@ class AudioController:
         return
 
       if not self._output_owned:
-        self._output_previous = self._capture_previous(
-          "output",
-          headset_output,
-        )
+        self._output_previous = self._capture_previous("output", headset_output)
 
       self._activated_output = headset_output
       self.set_default_outputs(
@@ -514,10 +453,7 @@ class AudioController:
       return
 
     if not self._input_owned:
-      self._input_previous = self._capture_previous(
-        "input",
-        headset_input,
-      )
+      self._input_previous = self._capture_previous("input", headset_input)
 
     self._activated_input = headset_input
     self.set_default_inputs(
@@ -662,10 +598,7 @@ class AudioController:
     # A configured fixed device takes priority if it is in the current catalog.
     target = None
     if fixed_id and self._catalog_contains(flow, fixed_id):
-      target = {
-        "console": fixed_id,
-        "communications": fixed_id,
-      }
+      target = { "console": fixed_id, "communications": fixed_id }
 
     if target is None:
       target = previous
@@ -698,9 +631,7 @@ class AudioController:
       for role, target_id in pending.items():
         actual = restored.get(role)
         if not actual or actual.casefold() != target_id.casefold():
-          raise RuntimeError(
-            f"Windows did not confirm restoration of {flow}/{role}."
-          )
+          raise RuntimeError(f"Windows did not confirm restoration of {flow}/{role}.")
 
     self._clear_flow_state(flow)
 
