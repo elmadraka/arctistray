@@ -595,5 +595,77 @@ class AudioDiscoveryTests(unittest.TestCase):
     self.assertFalse(self.discovery._refreshing)
     self.assertEqual(self.discovery.get_status()["status"], "error")
 
+  def test_state_change_to_active_refreshes_catalog(self):
+    self.discovery._devices = [
+      {
+        "id": "endpoint-1",
+        "name": "Headset",
+        "flow": "output",
+        "kind": "headset",
+        "available": False,
+      }
+    ]
+    self.discovery.discover = Mock(return_value=[])
+
+    self.assertTrue(
+      self.discovery._event_requires_refresh(
+        "endpoint_state_changed",
+        {"endpoint_id": "endpoint-1", "state": 1},
+      )
+    )
+
+  def test_state_change_between_inactive_states_does_not_refresh(self):
+    self.discovery._devices = [
+      {
+        "id": "endpoint-1",
+        "name": "Headset",
+        "flow": "output",
+        "kind": "headset",
+        "available": False,
+      }
+    ]
+
+    self.assertFalse(
+      self.discovery._event_requires_refresh(
+        "endpoint_state_changed",
+        {"endpoint_id": "endpoint-1", "state": 2},
+      )
+    )
+    self.assertFalse(
+      self.discovery._event_requires_refresh(
+        "endpoint_state_changed",
+        {"endpoint_id": "endpoint-1", "state": 4},
+      )
+    )
+
+  def test_repeated_active_state_does_not_refresh_catalog(self):
+    self.discovery._devices = [
+      {
+        "id": "endpoint-1",
+        "name": "Headset",
+        "flow": "output",
+        "kind": "headset",
+        "available": True,
+      }
+    ]
+
+    self.assertFalse(
+      self.discovery._event_requires_refresh(
+        "endpoint_state_changed",
+        {"endpoint_id": "endpoint-1", "state": 1},
+      )
+    )
+
+  def test_radio_state_does_not_trigger_catalog_refresh(self):
+    self.discovery.discover = Mock(return_value=[])
+
+    self.assertFalse(
+      self.discovery._event_requires_refresh(
+        "headset_connected",
+        {},
+      )
+    )
+    self.discovery.discover.assert_not_called()
+
 if __name__ == "__main__":
   unittest.main(verbosity=2)

@@ -1,6 +1,6 @@
+import threading
 from PIL import Image, ImageDraw
 import pystray
-
 
 COLORS = {
   "initializing": (150, 150, 150, 255),
@@ -41,17 +41,55 @@ class TrayUI:
     self.on_toggle_startup = on_toggle_startup
     self.on_quit = on_quit
 
-  def get_status(self):
-    outputs_status = self.get_outputs_status()
-    headset_state = self.get_headset_state()
+    self._blink_timer = None
+    self._blink_gray = False
+    self._blinking = False
+    self._update_icon_callback = None
 
-    if outputs_status == "initializing":
+  def start_blinking(self, update_icon_callback):
+    self._update_icon_callback = update_icon_callback
+    self._blinking = True
+    self._blink_gray = True
+    self._update_icon_callback()
+    self._schedule_blink()
+
+  def stop_blinking(self):
+    self._blinking = False
+
+    if self._blink_timer:
+      self._blink_timer.cancel()
+      self._blink_timer = None
+
+    self._blink_gray = False
+    self._update_icon_callback = None
+
+  def _schedule_blink(self):
+    if not self._blinking:
+      return
+
+    self._blink_timer = threading.Timer(0.4, self._toggle_blink)
+    self._blink_timer.daemon = True
+    self._blink_timer.start()
+
+  def _toggle_blink(self):
+    if not self._blinking:
+      return
+
+    self._blink_gray = not self._blink_gray
+
+    if self._update_icon_callback:
+      self._update_icon_callback()
+
+    self._schedule_blink()
+
+  def get_status(self):
+    if self.get_outputs_status() == "initializing":
       return "initializing"
 
     if not self.get_receiver_connected():
       return "disconnected"
 
-    if headset_state != "ENCENDIDO":
+    if self.get_headset_state() != "ENCENDIDO":
       return "inactive"
 
     if self.get_output_overridden():
@@ -62,9 +100,12 @@ class TrayUI:
 
     return "inactive"
 
-  def create_icon(self):
+  def create_current_icon(self):
+    return self.create_icon(gray=self._blinking and self._blink_gray)
+
+  def create_icon(self, gray=False):
     status = self.get_status()
-    color = COLORS[status]
+    color = COLORS["processing"] if gray else COLORS[status]
 
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)

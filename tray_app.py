@@ -87,6 +87,7 @@ class ArctisTray:
       return
 
     self.outputs_status = "processing"
+    self.ui.start_blinking(self.update_tray)
     self.update_tray()
 
   def _on_audio_refresh_finished(
@@ -100,6 +101,7 @@ class ArctisTray:
       return
 
     self.outputs_status = "error" if status == "error" else "ready"
+    self.ui.stop_blinking()
 
     if error:
       print(f"[AUDIO] Discovery error: {error}")
@@ -135,7 +137,7 @@ class ArctisTray:
     if not self.icon or self.closing:
       return
 
-    self.icon.icon = self.ui.create_icon()
+    self.icon.icon = self.ui.create_current_icon()
 
     if self.outputs_status == "initializing":
       self.icon.title = "Arctis 7+: Inicializando..."
@@ -209,6 +211,7 @@ class ArctisTray:
 
   def _shutdown(self):
     try:
+      self.ui.stop_blinking()
       self.device.stop()
 
       if self.device.is_alive():

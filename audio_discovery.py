@@ -205,11 +205,48 @@ class AudioDiscovery:
   _ENDPOINT_EVENTS = {
     "endpoint_added",
     "endpoint_removed",
-    "endpoint_state_changed",
-    "endpoint_property_changed",
   }
 
-  _REFRESH_DEBOUNCE_SECONDS = 0.2
+  _REFRESH_DEBOUNCE_SECONDS = 0.1
+
+  _ENDPOINT_STATE_REFRESH_STATES = {
+    1,  # DEVICE_STATE_ACTIVE
+    4,  # DEVICE_STATE_NOTPRESENT
+    8,  # DEVICE_STATE_UNPLUGGED
+  }
+
+  def _event_requires_refresh(self, event, payload):
+    if event in self._ENDPOINT_EVENTS:
+      return True
+
+    if event != "endpoint_state_changed":
+      return False
+
+    try:
+      new_state = int(payload.get("state"))
+    except (TypeError, ValueError):
+      return False
+
+    if new_state not in self._ENDPOINT_STATE_REFRESH_STATES:
+      return False
+
+    endpoint_id = payload.get("endpoint_id")
+    device = next(
+      (
+        device for device in self._devices
+        if str(device.get("id", "")).casefold()
+        == str(endpoint_id or "").casefold()
+      ),
+      None,
+    )
+
+    if device is None:
+      return new_state == 1
+
+    was_active = device.get("available") is True
+    is_active = new_state == 1
+
+    return was_active != is_active
 
   def __init__(self):
     self._condition = threading.Condition()
@@ -228,15 +265,6 @@ class AudioDiscovery:
     self._enumerator = None
     self._monitoring = False
     self._lifecycle_lock = threading.RLock()
-
-  @staticmethod
-  def _debug_log(message):
-    timestamp = time.strftime("%H:%M:%S")
-    thread_name = threading.current_thread().name
-    print(
-      f"[AUDIO-TRACE {timestamp}][{thread_name}] {message}",
-      flush=True,
-    )
 
   def get_status(self):
     """Return the current discovery status and last error."""
@@ -303,23 +331,11 @@ class AudioDiscovery:
   def discover(self):
     """Perform a full discovery and return normalized endpoint records."""
     phase_started = time.perf_counter()
-    self._debug_log("PNP query started")
     receivers, interfaces, pnp_endpoints = self.get_pnp_data()
-    self._debug_log(
-      f"PNP query completed in {time.perf_counter() - phase_started:.3f}s; "
-      f"receivers={len(receivers)}, interfaces={len(interfaces)}, "
-      f"endpoints={len(pnp_endpoints)}"
-    )
-
+    
     phase_started = time.perf_counter()
-    self._debug_log("CORE AUDIO enumeration started")
     all_devices = AudioUtilities.GetAllDevices()
-    self._debug_log(
-      f"CORE AUDIO enumeration completed in "
-      f"{time.perf_counter() - phase_started:.3f}s; "
-      f"devices={len(all_devices)}"
-    )
-
+    
     core_devices = {}
 
     for device in AudioUtilities.GetAllDevices():
@@ -404,38 +420,28 @@ class AudioDiscovery:
   def request_refresh(self):
     """Request an asynchronous audio catalog refresh."""
     if self._stop_event.is_set() or not self._worker or not self._worker.is_alive():
-      self._debug_log("REQUEST rejected: discovery is not running")
       raise RuntimeError("Audio discovery is not running.")
 
     with self._condition:
       if self._refreshing:
-        self._debug_log("REQUEST coalesced: refresh already running")
         return
 
       if self._refresh_pending:
-        self._debug_log("REQUEST coalesced: refresh already pending")
         return
 
       self._refresh_pending = True
       self._event_queue.put(("__refresh__", {}))
-      self._debug_log("REQUEST accepted: refresh queued")
-
   
   def _refresh(self):
     """Refresh the cached catalog once, coordinating concurrent callers."""
     started_at = time.perf_counter()
-    self._debug_log("REFRESH started")
 
     with self._condition:
       if self._refreshing:
-        self._debug_log("REFRESH waiting: another refresh is active")
         while self._refreshing:
           self._condition.wait()
         if self._status == "error":
-          raise RuntimeError(
-            f"Catalog refresh failed: {self._last_error}"
-          )
-        self._debug_log("REFRESH finished: reused concurrent result")
+          raise RuntimeError(f"Catalog refresh failed: {self._last_error}")
         return
 
       self._refreshing = True
@@ -451,29 +457,14 @@ class AudioDiscovery:
 
     try:
       phase_started = time.perf_counter()
-      self._debug_log("COM initialization started")
       comtypes.CoInitialize()
       com_initialized = True
-      self._debug_log(
-        f"COM initialization completed in "
-        f"{time.perf_counter() - phase_started:.3f}s"
-      )
 
       phase_started = time.perf_counter()
-      self._debug_log("DISCOVER started")
       new_devices = self.discover()
-      self._debug_log(
-        f"DISCOVER completed in "
-        f"{time.perf_counter() - phase_started:.3f}s: "
-        f"{len(new_devices)} devices"
-      )
-
+      
     except Exception as exc:
       error = exc
-      self._debug_log(
-        f"REFRESH failed after {time.perf_counter() - started_at:.3f}s: "
-        f"{type(exc).__name__}: {exc}"
-      )
 
     finally:
       if com_initialized:
@@ -482,9 +473,6 @@ class AudioDiscovery:
         except Exception as exc:
           if error is None:
             error = exc
-          self._debug_log(
-            f"COM cleanup failed: {type(exc).__name__}: {exc}"
-          )
 
     with self._condition:
       if error is None:
@@ -515,18 +503,7 @@ class AudioDiscovery:
     )
 
     if error is not None:
-      self._debug_log(
-        f"REFRESH ended with error in "
-        f"{time.perf_counter() - started_at:.3f}s"
-      )
       raise error
-
-    self._debug_log(
-      f"REFRESH completed in {time.perf_counter() - started_at:.3f}s; "
-      f"devices={len(new_snapshot)}; changed={old_devices != new_snapshot}"
-    )
-
-
 
   def _get_devices(self, devices, flow=None, kind=None, available=None):
     return [
@@ -703,7 +680,10 @@ class AudioDiscovery:
           break
 
         refresh_requested = event == "__refresh__"
-        refresh_pending = event in self._ENDPOINT_EVENTS or refresh_requested
+        refresh_pending = (
+          self._event_requires_refresh(event, payload)
+          or refresh_requested
+        )
 
         if not refresh_requested:
           self._process_native_event(event, payload, refresh=False)
@@ -730,7 +710,10 @@ class AudioDiscovery:
             stop_requested = True
             break
 
-          if next_event in self._ENDPOINT_EVENTS or next_event == "__refresh__":
+          if (
+            self._event_requires_refresh(next_event, next_payload)
+            or next_event == "__refresh__"
+          ):
             refresh_pending = True
 
           if next_event != "__refresh__":
@@ -741,13 +724,9 @@ class AudioDiscovery:
 
         if refresh_pending:
           try:
-            self._debug_log(
-              f"MONITOR triggering refresh; "
-              f"event={event!r}, pending={self._refresh_pending}"
-            )
             self._refresh()
-          except Exception:
-            pass
+          except Exception as exc:
+            print(f"MONITOR refresh failed: {exc}")
 
         if self._stop_event.is_set():
           break
@@ -782,7 +761,7 @@ class AudioDiscovery:
     if not refresh or event == "default_device_changed":
       return
 
-    if event in self._ENDPOINT_EVENTS:
+    if self._event_requires_refresh(event, payload):
       try:
         self._refresh()
       except Exception:
