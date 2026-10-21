@@ -121,9 +121,11 @@ class AudioControllerTests(unittest.TestCase):
       "monitoring_started",
       "monitoring_stopped",
       "default_device_changed",
-      "catalog_changed",
+      "refresh_started",
+      "refresh_finished",
       "discovery_error",
     }
+    
     self.assertEqual(set(self.discovery.listeners), expected_events)
 
     for callbacks in self.discovery.listeners.values():
@@ -624,6 +626,95 @@ class AudioControllerTests(unittest.TestCase):
     )
     self.assertTrue(self.device.headset_connected)
 
+
+  def test_refresh_started_is_forwarded_to_controller_listeners(self):
+    received = []
+    self.controller.add_listener(
+      "refresh_started",
+      lambda controller, **payload: received.append(
+        (controller, payload)
+      ),
+    )
+
+    self.controller._on_discovery_refresh_started(self.discovery)
+
+    self.assertEqual(len(received), 1)
+    self.assertIs(received[0][0], self.controller)
+    self.assertEqual(received[0][1], {})
+
+  def test_refresh_finished_updates_catalog_and_emits_result(self):
+    received = []
+    catalog = {
+      "active_outputs": [{"id": "arctis-output"}],
+      "active_inputs": [{"id": "arctis-input"}],
+      "headset_output": {"id": "arctis-output"},
+      "headset_input": {"id": "arctis-input"},
+    }
+
+    self.controller.add_listener(
+      "refresh_finished",
+      lambda controller, **payload: received.append(
+        (controller, payload)
+      ),
+    )
+
+    with patch.object(
+      self.controller,
+      "_headset_is_ready",
+      return_value=False,
+    ):
+      self.controller._on_discovery_refresh_finished(
+        self.discovery,
+        status="ready",
+        error=None,
+        catalog=catalog,
+      )
+
+    self.assertTrue(self.controller.discovery_ready)
+    self.assertIsNone(self.controller.discovery_error)
+    self.assertEqual(
+      self.controller._catalog,
+      {
+        "outputs": [{"id": "arctis-output"}],
+        "inputs": [{"id": "arctis-input"}],
+        "headset_output": "arctis-output",
+        "headset_input": "arctis-input",
+      },
+    )
+
+    self.assertEqual(len(received), 1)
+    self.assertIs(received[0][0], self.controller)
+    self.assertEqual(
+      received[0][1],
+      {"status": "ready", "error": None},
+    )
+
+  def test_refresh_finished_error_updates_state_and_emits_result(self):
+    received = []
+    error = "Catalog refresh failed"
+
+    self.controller.add_listener(
+      "refresh_finished",
+      lambda controller, **payload: received.append(
+        (controller, payload)
+      ),
+    )
+
+    self.controller._on_discovery_refresh_finished(
+      self.discovery,
+      status="error",
+      error=error,
+      catalog=None,
+    )
+
+    self.assertFalse(self.controller.discovery_ready)
+    self.assertEqual(self.controller.discovery_error, error)
+    self.assertEqual(len(received), 1)
+    self.assertIs(received[0][0], self.controller)
+    self.assertEqual(
+      received[0][1],
+      {"status": "error", "error": error},
+    )
 
 
 if __name__ == "__main__":

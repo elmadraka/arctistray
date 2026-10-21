@@ -82,8 +82,28 @@ class ArctisTray:
     print("[USB] Dongle disconnected.")
     self.update_tray()
 
-  def _on_audio_catalog_changed(self, discovery, **data):
-    self.outputs_status = "ready"
+  def _on_audio_refresh_started(self, discovery, **data):
+    if self.closing:
+      return
+
+    self.outputs_status = "processing"
+    self.update_tray()
+
+  def _on_audio_refresh_finished(
+    self,
+    discovery,
+    status="ready",
+    error=None,
+    **data,
+  ):
+    if self.closing:
+      return
+
+    self.outputs_status = "error" if status == "error" else "ready"
+
+    if error:
+      print(f"[AUDIO] Discovery error: {error}")
+
     self.update_tray()
 
   def _on_audio_discovery_error(self, discovery, error=None, **data):
@@ -140,12 +160,6 @@ class ArctisTray:
   def refresh_outputs(self, icon=None, item=None):
     if self.closing:
       return
-
-    was_ready = self.outputs_status == "ready"
-
-    if not was_ready:
-      self.outputs_status = "processing"
-      self.update_tray()
 
     try:
       self.audio.refresh_outputs()
@@ -207,9 +221,9 @@ class ArctisTray:
       print(f"[DEVICE] Error durante el cierre: {exc}")
 
     try:
-      self.audio.discovery.remove_listener("catalog_changed", self._on_audio_catalog_changed)
-      self.audio.discovery.remove_listener("discovery_error", self._on_audio_discovery_error)
-
+      self.audio.remove_listener("discovery_error", self._on_audio_discovery_error)
+      self.audio.remove_listener("refresh_started", self._on_audio_refresh_started)
+      self.audio.remove_listener("refresh_finished", self._on_audio_refresh_finished)
       stopped = self.audio.stop(timeout=5)
 
       if not stopped:
@@ -230,8 +244,9 @@ class ArctisTray:
       menu=self.ui.get_menu()
     )
 
-    self.audio.discovery.add_listener("catalog_changed", self._on_audio_catalog_changed)
-    self.audio.discovery.add_listener("discovery_error", self._on_audio_discovery_error)
+    self.audio.add_listener("discovery_error", self._on_audio_discovery_error)
+    self.audio.add_listener("refresh_started", self._on_audio_refresh_started)
+    self.audio.add_listener("refresh_finished", self._on_audio_refresh_finished)
     self.audio.start()
     self.device.start()
 

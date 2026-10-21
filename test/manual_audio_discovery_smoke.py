@@ -9,14 +9,13 @@ from audio_discovery import AudioDiscovery
 
 
 EVENT_NAMES = (
-    "monitoring_started",
-    "monitoring_stopped",
-    "catalog_changed",
-    "default_device_changed",
-    "endpoint_added",
-    "endpoint_removed",
-    "endpoint_state_changed",
-    "discovery_error",
+  "monitoring_started",
+  "monitoring_stopped",
+  "refresh_started",
+  "refresh_finished",
+  "default_device_changed",
+  "endpoint_added",
+  "endpoint_removed",
 )
 
 
@@ -24,10 +23,22 @@ def make_event_printer(event_name):
   def print_event(*args, **kwargs):
     print(f"\n[EVENT] {event_name}")
 
-    if event_name == "catalog_changed":
-      devices = kwargs.get("devices", [])
+    if event_name == "refresh_started":
+      print("  Audio catalog refresh started.")
 
-      print(f"  Device count: {len(devices)}")
+    elif event_name == "refresh_finished":
+      status = kwargs.get("status", "unknown")
+      error = kwargs.get("error")
+      catalog = kwargs.get("catalog")
+
+      print(f"  Status: {status}")
+
+      if error:
+        print(f"  Error: {error}")
+
+      if catalog is not None:
+        devices = catalog.get("devices", [])
+        print(f"  Device count: {len(devices)}")
 
       headsets = [
           device for device in devices

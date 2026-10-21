@@ -541,6 +541,59 @@ class AudioDiscoveryTests(unittest.TestCase):
       with self.subTest(event=event):
         callback.assert_called_once()
 
+  def test_refresh_emits_started_and_finished_without_catalog_changes(self):
+    devices = [
+      {
+        "id": "o1",
+        "name": "Headset",
+        "flow": "output",
+        "kind": "headset",
+        "available": True,
+      }
+    ]
+    self.discovery.discover = Mock(return_value=devices)
+    started = Mock()
+    finished = Mock()
+
+    self.discovery.add_listener("refresh_started", started)
+    self.discovery.add_listener("refresh_finished", finished)
+
+    self.discovery._refresh()
+    self.discovery._refresh()
+
+    self.assertEqual(started.call_count, 2)
+    self.assertEqual(finished.call_count, 2)
+    finished.assert_called_with(
+      self.discovery,
+      status="ready",
+      error=None,
+      catalog=self.discovery._build_catalog(self.discovery._devices),
+    )
+
+  def test_refresh_emits_finished_when_discovery_fails(self):
+    self.discovery.discover = Mock(
+      side_effect=RuntimeError("Simulated discovery failure")
+    )
+    started = Mock()
+    finished = Mock()
+
+    self.discovery.add_listener("refresh_started", started)
+    self.discovery.add_listener("refresh_finished", finished)
+
+    with self.assertRaisesRegex(
+      RuntimeError, "Simulated discovery failure"
+    ):
+      self.discovery._refresh()
+
+    started.assert_called_once_with(self.discovery)
+    finished.assert_called_once_with(
+      self.discovery,
+      status="error",
+      error="Simulated discovery failure",
+      catalog=None,
+    )
+    self.assertFalse(self.discovery._refreshing)
+    self.assertEqual(self.discovery.get_status()["status"], "error")
 
 if __name__ == "__main__":
   unittest.main(verbosity=2)

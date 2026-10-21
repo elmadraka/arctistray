@@ -2,6 +2,7 @@ import queue
 import threading
 
 from audio_discovery import AudioDiscovery
+from collections import defaultdict
 
 
 class AudioController:
@@ -39,6 +40,8 @@ class AudioController:
 
     self._last_log_messages = {}
     self._state_lock = threading.RLock()
+    self._listeners = defaultdict(list)
+    self._listener_lock = threading.RLock()
 
   @property
   def output_overridden(self):
@@ -61,6 +64,34 @@ class AudioController:
   def cached_headset_input(self):
     return self._catalog["headset_input"]
 
+  def add_listener(self, event, callback):
+    with self._listener_lock:
+      if callback not in self._listeners[event]:
+        self._listeners[event].append(callback)
+
+  def remove_listener(self, event, callback):
+    with self._listener_lock:
+      listeners = self._listeners.get(event, [])
+      if callback in listeners:
+        listeners.remove(callback)
+
+      if not listeners:
+        self._listeners.pop(event, None)
+
+  def _emit(self, event, payload=None):
+    payload = payload or {}
+
+    with self._listener_lock:
+      listeners = list(self._listeners.get(event, []))
+
+    for callback in listeners:
+      try:
+        callback(self, **payload)
+      except Exception as exc:
+        print(
+          f"[AUDIO] Error in '{event}' listener: {exc}"
+        )
+
   def _register_discovery_listeners(self):
     if self._discovery_listeners_registered:
       return
@@ -68,7 +99,8 @@ class AudioController:
     self.discovery.add_listener("monitoring_started", self._on_discovery_monitoring_started)
     self.discovery.add_listener("monitoring_stopped", self._on_discovery_monitoring_stopped)
     self.discovery.add_listener("default_device_changed", self._on_default_device_changed)
-    self.discovery.add_listener("catalog_changed", self._on_catalog_changed)
+    self.discovery.add_listener("refresh_started", self._on_discovery_refresh_started)
+    self.discovery.add_listener("refresh_finished", self._on_discovery_refresh_finished)
     self.discovery.add_listener("discovery_error", self._on_discovery_error)
     self._discovery_listeners_registered = True
 
@@ -79,7 +111,8 @@ class AudioController:
     self.discovery.remove_listener("monitoring_started", self._on_discovery_monitoring_started)
     self.discovery.remove_listener("monitoring_stopped", self._on_discovery_monitoring_stopped)
     self.discovery.remove_listener("default_device_changed", self._on_default_device_changed)
-    self.discovery.remove_listener("catalog_changed", self._on_catalog_changed)
+    self.discovery.remove_listener("refresh_started", self._on_discovery_refresh_started)
+    self.discovery.remove_listener("refresh_finished", self._on_discovery_refresh_finished)
     self.discovery.remove_listener("discovery_error", self._on_discovery_error)
     self._discovery_listeners_registered = False
 
@@ -103,21 +136,45 @@ class AudioController:
     if flow in ("output", "input"):
       self._queue_default_change(flow)
 
-  def _on_catalog_changed(self, discovery, devices, **payload):
-    try:
-      catalog = discovery.get_catalog()
-      self._update_catalog(catalog)
-    except Exception as exc:
-      self.discovery_error = str(exc)
-      print(f"[AUDIO] Error updating the audio catalog: {exc}")
-      return
+  def _on_discovery_refresh_started(self, discovery, **payload):
+    self._emit("refresh_started", {})
 
-    if self._headset_is_ready():
+  def _on_discovery_refresh_finished(
+    self,
+    discovery,
+    status=None,
+    error=None,
+    catalog=None,
+    **payload,
+  ):
+    if status == "ready" and catalog is not None:
+      try:
+        self._update_catalog(catalog)
+      except Exception as exc:
+        self.discovery_error = str(exc)
+        self.discovery_ready = False
+        print(f"[AUDIO] Error updating the audio catalog: {exc}")
+        status = "error"
+        error = str(exc)
+    else:
+      self.discovery_error = error or "Audio catalog refresh failed."
+      self.discovery_ready = False
+
+    if status == "ready" and self._headset_is_ready():
       self.request_activation()
+
+    self._emit(
+      "refresh_finished",
+      {
+        "status": status or "error",
+        "error": error,
+      },
+    )
 
   def _on_discovery_error(self, discovery, error, **payload):
     self.discovery_error = error
     print(f"[AUDIO] Audio discovery error: {error}")
+    self._emit("discovery_error", {"error": error})
 
   def bind_device(self, device):
     if self.device is not None:
