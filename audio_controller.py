@@ -235,18 +235,14 @@ class AudioController:
     )
 
   def refresh_outputs(self):
-    """Refresh the catalog through AudioDiscovery."""
+    """Request an audio catalog refresh."""
     try:
-      catalog = self.discovery.get_catalog(refresh=True)
-      self._update_catalog(catalog)
+      self.discovery.request_refresh()
     except Exception as exc:
       self.discovery_error = str(exc)
       self.discovery_ready = False
-      print(f"[AUDIO] Error discovering audio devices: {exc}")
+      print(f"[AUDIO] Error requesting audio catalog refresh: {exc}")
       raise
-
-    if self._headset_is_ready():
-      self.request_activation()
 
   def get_outputs(self):
     return [item.copy() for item in self._catalog["outputs"]]

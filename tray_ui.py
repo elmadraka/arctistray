@@ -1,6 +1,7 @@
 from PIL import Image, ImageDraw
 import pystray
 
+
 COLORS = {
   "initializing": (150, 150, 150, 255),
   "processing": (150, 150, 150, 255),
@@ -10,6 +11,7 @@ COLORS = {
   "manual": (160, 90, 210, 255)
 }
 
+
 class TrayUI:
   def __init__(
     self,
@@ -18,13 +20,12 @@ class TrayUI:
     get_audio_connected,
     get_output_overridden,
     get_outputs_status,
-    get_refreshing_outputs,
-    get_refresh_blink_gray,
     get_outputs,
     get_config,
     on_refresh_outputs,
     on_select_automatic,
     on_select_fixed_output,
+    on_toggle_startup,
     on_quit
   ):
     self.get_headset_state = get_headset_state
@@ -32,13 +33,12 @@ class TrayUI:
     self.get_audio_connected = get_audio_connected
     self.get_output_overridden = get_output_overridden
     self.get_outputs_status = get_outputs_status
-    self.get_refreshing_outputs = get_refreshing_outputs
-    self.get_refresh_blink_gray = get_refresh_blink_gray
     self.get_outputs = get_outputs
     self.get_config = get_config
     self.on_refresh_outputs = on_refresh_outputs
     self.on_select_automatic = on_select_automatic
     self.on_select_fixed_output = on_select_fixed_output
+    self.on_toggle_startup = on_toggle_startup
     self.on_quit = on_quit
 
   def get_status(self):
@@ -64,10 +64,6 @@ class TrayUI:
 
   def create_icon(self):
     status = self.get_status()
-
-    if self.get_refreshing_outputs() and self.get_refresh_blink_gray():
-      status = "processing"
-
     color = COLORS[status]
 
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -111,7 +107,6 @@ class TrayUI:
 
   def build_menu_items(self):
     outputs_status = self.get_outputs_status()
-    refreshing_outputs = self.get_refreshing_outputs()
     headset_state = self.get_headset_state()
     receiver_connected = self.get_receiver_connected()
     audio_connected = self.get_audio_connected()
@@ -135,7 +130,7 @@ class TrayUI:
         self.do_nothing,
         enabled=False
       )
-      
+
     yield pystray.MenuItem(
       lambda item: f"Auriculares: {self.get_headset_state()}",
       self.do_nothing,
@@ -184,7 +179,7 @@ class TrayUI:
       radio=True
     )
 
-    if outputs_status == "ready" and not refreshing_outputs:
+    if outputs_status == "ready":
       try:
         for output in self.get_outputs():
           if output["kind"] == "headset":
@@ -208,10 +203,9 @@ class TrayUI:
         )
 
     yield pystray.MenuItem(
-      "Actualizando dispositivos..." if refreshing_outputs
-      else "Actualizar dispositivos",
+      "Actualizar dispositivos",
       self.on_refresh_outputs,
-      enabled=not refreshing_outputs
+      enabled=outputs_status != "processing"
     )
 
     yield pystray.Menu.SEPARATOR
@@ -227,11 +221,13 @@ class TrayUI:
 
     yield pystray.MenuItem(
       lambda item: (
-        f"Iniciar con Windows: "
+        "Iniciar con Windows: "
         f"{'Sí' if self.get_config('startup_enabled') else 'No'}"
       ),
-      self.do_nothing,
-      enabled=False
+      self.on_toggle_startup,
+      checked=lambda item: bool(
+        self.get_config("startup_enabled")
+      )
     )
 
     yield pystray.Menu.SEPARATOR
@@ -252,6 +248,5 @@ class TrayUI:
         self.get_config("output_fixed") is not None
         and self.get_config("output_fixed") == device_id
       )
-
 
     return checked

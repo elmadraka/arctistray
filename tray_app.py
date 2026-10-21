@@ -5,27 +5,31 @@ from audio_controller import AudioController
 from config_manager import ConfigManager
 from device_factory import create_device
 from tray_ui import TrayUI
-
+from startup_manager import (
+  is_startup_enabled,
+  set_startup_enabled
+)
 
 class ArctisTray:
   def __init__(self):
     self.config = ConfigManager()
+
+    try:
+      startup_enabled = is_startup_enabled()
+
+      if self.config.get("startup_enabled") != startup_enabled:
+        self.config.set_startup_enabled(startup_enabled)
+    except Exception as exc:
+      print(f"[STARTUP] Windows registry read error: {exc}")
+
     self.device = create_device()
     self.audio = AudioController(self.config)
     self.audio.bind_device(self.device)
 
     self.icon = None
     self.closing = False
-    self.refreshing_outputs = False
-    self.refresh_blink_gray = False
     self.outputs_status = "initializing"
 
-    self._refresh_blink_stop = threading.Event()
-    self._refresh_blink_thread = None
-
-    self._refresh_lock = threading.Lock()
-    self._refresh_thread = None
-    self._refresh_pending = False
     self._shutdown_lock = threading.Lock()
     self._shutdown_started = False
     self._shutdown_thread = None
@@ -41,13 +45,12 @@ class ArctisTray:
       get_audio_connected=lambda: self.device.headset_active is True,
       get_outputs_status=lambda: self.outputs_status,
       get_output_overridden=lambda: self.audio.output_overridden,
-      get_refreshing_outputs=lambda: self.refreshing_outputs,
-      get_refresh_blink_gray=lambda: self.refresh_blink_gray,
       get_outputs=self.audio.get_outputs,
       get_config=self.config.get,
       on_refresh_outputs=self.refresh_outputs,
       on_select_automatic=self.select_automatic,
       on_select_fixed_output=self.select_fixed_output,
+      on_toggle_startup=self.toggle_startup,
       on_quit=self.quit_app
     )
 
@@ -80,7 +83,33 @@ class ArctisTray:
     self.update_tray()
 
   def _on_audio_catalog_changed(self, discovery, **data):
+    self.outputs_status = "ready"
     self.update_tray()
+
+  def _on_audio_discovery_error(self, discovery, error=None, **data):
+    self.outputs_status = "error"
+    print(f"[AUDIO] Discovery error: {error or data}")
+    self.update_tray()
+
+  def toggle_startup(self, icon, item):
+    try:
+      current_value = is_startup_enabled()
+      new_value = not current_value
+
+      set_startup_enabled(new_value)
+
+      try:
+        self.config.set_startup_enabled(new_value)
+      except Exception:
+        set_startup_enabled(current_value)
+        raise
+
+    except Exception as exc:
+      print(f"[STARTUP] Error cambiando el inicio: {exc}")
+      return
+
+    if self.icon and not self.closing:
+      self.icon.update_menu()
 
   def update_tray(self):
     if not self.icon or self.closing:
@@ -109,69 +138,21 @@ class ArctisTray:
     self.icon.update_menu()
 
   def refresh_outputs(self, icon=None, item=None):
-    self._start_output_refresh(force=True)
-
-  def _start_output_refresh(self, force):
     if self.closing:
       return
 
-    if not force and self.outputs_status == "ready":
-      return
+    was_ready = self.outputs_status == "ready"
 
-    if not self._refresh_lock.acquire(blocking=False):
-      self._refresh_pending = True
-      return
-
-    self.refreshing_outputs = True
-    self.refresh_blink_gray = False
-    self._refresh_blink_stop.clear()
-    self.outputs_status = "processing"
-    self.update_tray()
-
-    self._refresh_blink_thread = threading.Thread(
-      target=self._refresh_blink_worker,
-      name="ArctisTrayRefreshBlink",
-      daemon=True
-    )
-    self._refresh_blink_thread.start()
-
-    self._refresh_thread = threading.Thread(
-      target=self._refresh_outputs_worker,
-      name="ArctisTrayOutputRefresh",
-      daemon=True
-    )
-    self._refresh_thread.start()
-
-  def _refresh_blink_worker(self):
-    while not self._refresh_blink_stop.wait(0.45):
-      if not self.refreshing_outputs or self.closing:
-        break
-
-      self.refresh_blink_gray = not self.refresh_blink_gray
+    if not was_ready:
+      self.outputs_status = "processing"
       self.update_tray()
 
-  def _refresh_outputs_worker(self):
     try:
       self.audio.refresh_outputs()
-
-      if not self.closing:
-        self.outputs_status = "ready"
-
     except Exception as exc:
-      if not self.closing:
-        self.outputs_status = "error"
-        print(f"[AUDIO] Error actualizando los dispositivos: {exc}")
-
-    finally:
-      self.refreshing_outputs = False
-      self.refresh_blink_gray = False
-      self._refresh_blink_stop.set()
-      self._refresh_lock.release()
+      self.outputs_status = "error"
+      print(f"[AUDIO] Error requesting device refresh: {exc}")
       self.update_tray()
-
-      if self._refresh_pending and not self.closing:
-        self._refresh_pending = False
-        self._start_output_refresh(force=True)
 
   def change_output_configuration(self, mode, device_id=None):
     if mode not in ("automatic", "fixed"):
@@ -226,32 +207,20 @@ class ArctisTray:
       print(f"[DEVICE] Error durante el cierre: {exc}")
 
     try:
-      refresh_thread = self._refresh_thread
+      self.audio.discovery.remove_listener("catalog_changed", self._on_audio_catalog_changed)
+      self.audio.discovery.remove_listener("discovery_error", self._on_audio_discovery_error)
 
-      if (
-        refresh_thread
-        and refresh_thread.is_alive()
-        and refresh_thread is not threading.current_thread()
-      ):
-        refresh_thread.join(timeout=5)
+      stopped = self.audio.stop(timeout=5)
 
-        if refresh_thread.is_alive():
-          print("[AUDIO] El descubrimiento sigue activo durante el cierre.")
+      if not stopped:
+        print("[AUDIO] El trabajador de audio sigue activo.")
+
+    except Exception as exc:
+      print(f"[AUDIO] Error durante el cierre: {exc}")
 
     finally:
-      try:
-        self.audio.discovery.remove_listener("catalog_changed", self._on_audio_catalog_changed)
-        stopped = self.audio.stop(timeout=5)
-
-        if not stopped:
-          print("[AUDIO] El trabajador de audio sigue activo.")
-
-      except Exception as exc:
-        print(f"[AUDIO] Error durante el cierre: {exc}")
-
-      finally:
-        if self.icon:
-          self.icon.stop()
+      if self.icon:
+        self.icon.stop()
 
   def run(self):
     self.icon = pystray.Icon(
@@ -261,10 +230,10 @@ class ArctisTray:
       menu=self.ui.get_menu()
     )
 
-    self.audio.start()
     self.audio.discovery.add_listener("catalog_changed", self._on_audio_catalog_changed)
+    self.audio.discovery.add_listener("discovery_error", self._on_audio_discovery_error)
+    self.audio.start()
     self.device.start()
-    self._start_output_refresh(force=False)
 
     try:
       self.icon.run()
