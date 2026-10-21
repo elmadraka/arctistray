@@ -1,8 +1,13 @@
+import sys
 import queue
 import time
 import unittest
 import threading
+from pathlib import Path
 from unittest.mock import patch
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from audio_controller import AudioController
 
@@ -517,6 +522,107 @@ class AudioControllerTests(unittest.TestCase):
     self.assertFalse(self.controller._input_owned)
     self.assertIsNone(self.controller._activated_input)
     self.assertIn(False, self.device.active_states)
+
+
+  def test_stop_restores_owned_output_when_headset_is_connected(self):
+    self.controller.bind_device(self.device)
+    self.controller.config = {}
+    self.controller._output_owned = True
+    self.controller._activated_output = "arctis-output"
+    self.controller._output_previous = {
+      "console": "previous-console",
+      "communications": "previous-communications",
+    }
+    self.controller._output_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["outputs"] = [
+      {"id": "previous-console"},
+      {"id": "previous-communications"},
+      {"id": "arctis-output"},
+    ]
+    self.discovery.defaults["output"] = {
+      "console": "arctis-output",
+      "communications": "arctis-output",
+    }
+
+    self.controller.stop(timeout=2)
+
+    self.assertEqual(
+      self.discovery.defaults["output"],
+      {
+        "console": "previous-console",
+        "communications": "previous-communications",
+      },
+    )
+
+  def test_stop_restores_owned_input_when_input_changes_are_enabled(self):
+    self.controller.bind_device(self.device)
+    self.controller.config = {"input_change_enabled": True}
+    self.controller._input_owned = True
+    self.controller._activated_input = "arctis-input"
+    self.controller._input_previous = {
+      "console": "previous-console-input",
+      "communications": "previous-communications-input",
+    }
+    self.controller._input_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["inputs"] = [
+      {"id": "previous-console-input"},
+      {"id": "previous-communications-input"},
+      {"id": "arctis-input"},
+    ]
+    self.discovery.defaults["input"] = {
+      "console": "arctis-input",
+      "communications": "arctis-input",
+    }
+
+    self.controller.stop(timeout=2)
+
+    self.assertEqual(
+      self.discovery.defaults["input"],
+      {
+        "console": "previous-console-input",
+        "communications": "previous-communications-input",
+      },
+    )
+
+  def test_stop_does_not_require_headset_disconnect_to_restore_output(self):
+    self.controller.bind_device(self.device)
+    self.device.headset_connected = True
+    self.controller._output_owned = True
+    self.controller._activated_output = "arctis-output"
+    self.controller._output_previous = {
+      "console": "previous-console",
+      "communications": "previous-communications",
+    }
+    self.controller._output_changed_roles = {
+      "console",
+      "communications",
+    }
+    self.controller._catalog["outputs"] = [
+      {"id": "previous-console"},
+      {"id": "previous-communications"},
+      {"id": "arctis-output"},
+    ]
+    self.discovery.defaults["output"] = {
+      "console": "arctis-output",
+      "communications": "arctis-output",
+    }
+
+    self.controller.stop(timeout=2)
+
+    self.assertEqual(
+      self.discovery.defaults["output"],
+      {
+        "console": "previous-console",
+        "communications": "previous-communications",
+      },
+    )
+    self.assertTrue(self.device.headset_connected)
 
 
 

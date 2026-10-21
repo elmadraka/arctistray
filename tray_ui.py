@@ -179,7 +179,7 @@ class TrayUI:
       "Automática (última salida)",
       self.on_select_automatic,
       checked=lambda item: (
-        self.get_config("output_mode") == "automatic"
+        self.get_config("output_fixed") is None
       ),
       radio=True
     )
@@ -219,7 +219,7 @@ class TrayUI:
     yield pystray.MenuItem(
       lambda item: (
         f"Cambiar entrada: "
-        f"{'Sí' if self.get_config('change_input') else 'No'}"
+        f"{'Sí' if self.get_config('input_change_enabled') else 'No'}"
       ),
       self.do_nothing,
       enabled=False
@@ -228,7 +228,7 @@ class TrayUI:
     yield pystray.MenuItem(
       lambda item: (
         f"Iniciar con Windows: "
-        f"{'Sí' if self.get_config('startup') else 'No'}"
+        f"{'Sí' if self.get_config('startup_enabled') else 'No'}"
       ),
       self.do_nothing,
       enabled=False
@@ -249,8 +249,9 @@ class TrayUI:
   def make_output_checked(self, device_id):
     def checked(item):
       return (
-        self.get_config("output_mode") == "fixed"
-        and self.get_config("fixed_output") == device_id
+        self.get_config("output_fixed") is not None
+        and self.get_config("output_fixed") == device_id
       )
+
 
     return checked

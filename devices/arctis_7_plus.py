@@ -22,13 +22,19 @@ HID_POLL_COMMANDS = (
   ((0x02, 0x01), True),
 )
 
-# Signature used to identify a report indicating that the headset is powered on.
-HEADSET_ON_REPORT_PREFIX = (0xB0, 0x03, 0x04, 0x03)
+# Signatures used to identify reports indicating that the headset is powered on.
+HEADSET_ON_REPORT_PREFIXES = (
+  (0xB0, 0x03, 0x03, 0x03),
+  (0xB0, 0x03, 0x04, 0x03),
+)
 HEADSET_ON_VALUE_BYTE_INDEX = 5
 HEADSET_ON_VALUE = 0x64
 
-# Signature and marker used to identify a report indicating that the headset is powered off.
-HEADSET_OFF_REPORT_PREFIX = (0xB0, 0x01, 0x04, 0x00)
+# Signatures and marker used to identify reports indicating that the headset is powered off.
+HEADSET_OFF_REPORT_PREFIXES = (
+  (0xB0, 0x01, 0x03, 0x00),
+  (0xB0, 0x01, 0x04, 0x00),
+)
 HEADSET_OFF_MARKER_INDEX = 4
 HEADSET_OFF_MARKER = (0xFF, 0xFF)
 

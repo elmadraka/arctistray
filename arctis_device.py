@@ -279,23 +279,29 @@ class ArctisDevice(threading.Thread):
     if raw_report_hex != self._last_raw_report_hex:
       self._last_raw_report_hex = raw_report_hex
 
-    on_prefix = protocol.HEADSET_ON_REPORT_PREFIX
+    on_prefixes = protocol.HEADSET_ON_REPORT_PREFIXES
     on_index = protocol.HEADSET_ON_VALUE_BYTE_INDEX
 
     if (
       len(report_data) > on_index
-      and tuple(report_data[:len(on_prefix)]) == on_prefix
+      and any(
+        tuple(report_data[:len(prefix)]) == prefix
+        for prefix in on_prefixes
+      )
       and report_data[on_index] == protocol.HEADSET_ON_VALUE
     ):
       self.set_headset_connected(True)
 
-    off_prefix = protocol.HEADSET_OFF_REPORT_PREFIX
+    off_prefixes = protocol.HEADSET_OFF_REPORT_PREFIXES
     marker_index = protocol.HEADSET_OFF_MARKER_INDEX
     marker = protocol.HEADSET_OFF_MARKER
 
     if (
       len(report_data) >= marker_index + len(marker)
-      and tuple(report_data[:len(off_prefix)]) == off_prefix
+      and any(
+        tuple(report_data[:len(prefix)]) == prefix
+        for prefix in off_prefixes
+      )
       and tuple(
         report_data[marker_index:marker_index + len(marker)]
       ) == marker

@@ -79,6 +79,9 @@ class ArctisTray:
     print("[USB] Dongle disconnected.")
     self.update_tray()
 
+  def _on_audio_catalog_changed(self, discovery, **data):
+    self.update_tray()
+
   def update_tray(self):
     if not self.icon or self.closing:
       return
@@ -171,13 +174,20 @@ class ArctisTray:
         self._start_output_refresh(force=True)
 
   def change_output_configuration(self, mode, device_id=None):
-    self.config.set_fixed_output(device_id)
+    if mode not in ("automatic", "fixed"):
+      raise ValueError(f"Invalid output mode: {mode}")
 
+    if mode == "fixed" and not device_id:
+      raise ValueError("A device ID is required for fixed output mode.")
+
+    try:
+      self.config.set_fixed_output(
+        device_id if mode == "fixed" else None
+      )
     except Exception as exc:
-      print(f"[CONFIG] Error guardando la configuración: {exc}")
+      print(f"[CONFIG] Error saving output configuration: {exc}")
       return
 
-    # Cambiar la preferencia de restauración no altera la salida actual.
     if self.icon and not self.closing:
       self.icon.update_menu()
 
@@ -230,6 +240,7 @@ class ArctisTray:
 
     finally:
       try:
+        self.audio.discovery.remove_listener("catalog_changed", self._on_audio_catalog_changed)
         stopped = self.audio.stop(timeout=5)
 
         if not stopped:
@@ -251,6 +262,7 @@ class ArctisTray:
     )
 
     self.audio.start()
+    self.audio.discovery.add_listener("catalog_changed", self._on_audio_catalog_changed)
     self.device.start()
     self._start_output_refresh(force=False)
 

@@ -166,8 +166,6 @@ class AudioController:
 
   def stop(self, timeout=5):
     self._closing = True
-
-    discovery_stopped = self.discovery.stop(timeout=timeout)
     self._tasks.put("stop")
 
     worker = self._worker
@@ -178,10 +176,25 @@ class AudioController:
     ):
       worker.join(timeout=max(0, timeout))
 
-    stopped = (
-      discovery_stopped
-      and (worker is None or not worker.is_alive())
+    worker_stopped = (
+      worker is None
+      or not worker.is_alive()
+      or worker is threading.current_thread()
     )
+
+    # Restore devices only after the worker can no longer change them.
+    if worker_stopped:
+      for flow in ("input", "output"):
+        if flow == "input" and not self._input_change_enabled():
+          continue
+
+        try:
+          self._restore_flow(flow)
+        except Exception as exc:
+          print(f"[AUDIO] Error restoring {flow} during shutdown: {exc}")
+
+    discovery_stopped = self.discovery.stop(timeout=timeout)
+    stopped = discovery_stopped and worker_stopped
 
     self._unregister_discovery_listeners()
     self._discovery_monitor_ready = False
