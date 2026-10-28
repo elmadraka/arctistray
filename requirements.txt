@@ -1,0 +1,5 @@
+hidapi==0.15.0
+comtypes==1.4.17
+pycaw==20260927
+pystray==0.19.5
+Pillow==12.3.0
