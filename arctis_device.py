@@ -1,431 +1,380 @@
+from __future__ import annotations
+
+import logging
+import queue
 import threading
-import hid
-
-
-class ArctisDevice(threading.Thread):
-  def __init__(self, protocol):
-    super().__init__(daemon=True)
-
-    self.protocol = protocol
-    self._state_lock = threading.RLock()
-    self._listeners = {}
-    self._last_raw_report_hex = None
-    self._stop_event = threading.Event()
-
-    self.headset_dongle_connected = None
-    self.headset_connected = None
-    self.headset_active = None
-    self.battery = None
-
-    self._last_radio_status = None
-
-  # ------------------------------------------------------------------
-  # Event handling
-  # ------------------------------------------------------------------
-
-  def add_listener(self, event, callback):
-    with self._state_lock:
-      listeners = self._listeners.setdefault(event, [])
-
-      if callback not in listeners:
-        listeners.append(callback)
-
-  def remove_listener(self, event, callback):
-    with self._state_lock:
-      listeners = self._listeners.get(event, [])
-
-      if callback in listeners:
-        listeners.remove(callback)
-
-  def _emit(self, event, **data):
-    with self._state_lock:
-      listeners = tuple(self._listeners.get(event, []))
-
-    for callback in listeners:
-      try:
-        callback(self, **data)
-      except Exception as exc:
-        print(f"[DEVICE] Error in '{event}' listener: {exc}")
-
-  def _state_changed(self, **changes):
-    self._emit("state_changed", changes=changes)
-
-  # ------------------------------------------------------------------
-  # Public device state
-  # ------------------------------------------------------------------
-
-  def get_state(self):
-    """Return a consistent snapshot of the current device state."""
-    with self._state_lock:
-      return {
-        "headset_dongle_connected": self.headset_dongle_connected,
-        "headset_connected": self.headset_connected,
-        "headset_active": self.headset_active,
-        "battery": self.battery,
-      }
-
-  def set_dongle_connected(self, connected):
-    if connected not in (True, False, None):
-      raise ValueError("Invalid dongle connection state.")
-
-    with self._state_lock:
-      if self.headset_dongle_connected is connected:
-        return
-
-      previous_dongle_state = self.headset_dongle_connected
-      self.headset_dongle_connected = connected
-      events = []
-
-      if connected is True:
-        self.headset_connected = False
-        self.headset_active = None
-        self.battery = None
-
-        if previous_dongle_state is not True:
-          events.append("headset_dongle_connected")
-
-      else:
-        self.headset_connected = None
-        self.headset_active = None
-        self.battery = None
-
-        if connected is False:
-          events.append("headset_dongle_disconnected")
-
-      changes = {
-        "headset_dongle_connected": self.headset_dongle_connected,
-        "headset_connected": self.headset_connected,
-        "headset_active": self.headset_active,
-        "battery": self.battery,
-      }
-
-    for event in events:
-      self._emit(event)
-
-    self._state_changed(**changes)
-
-  def set_headset_connected(self, connected):
-    if connected not in (True, False):
-      raise ValueError("Headset connection state must be True or False.")
-
-    with self._state_lock:
-      if self.headset_dongle_connected is not True:
-        return
-
-      if self.headset_connected is connected:
-        return
-
-      previous_connected = self.headset_connected
-      self.headset_connected = connected
-      self.headset_active = None
-      events = []
-
-      if connected:
-        events.append("headset_connected")
-        message = "[HEADSET] Headset connected."
-
-      else:
-        if previous_connected is True:
-          events.append("headset_disconnected")
-        message = "[HEADSET] Headset disconnected."
-
-      changes = {
-        "headset_connected": self.headset_connected,
-        "headset_active": self.headset_active,
-      }
-    
-    print(message)
-
-    for event in events:
-      self._emit(event)
-
-    self._state_changed(**changes)
-
-  def set_headset_active(self, active):
-    if active not in (True, False, None):
-      raise ValueError("Invalid headset active state.")
-
-    with self._state_lock:
-      if (
-        self.headset_dongle_connected is not True
-        or self.headset_connected is not True
-      ):
-        active = None
-
-      if self.headset_active is active:
-        return
-
-      previous_active = self.headset_active
-      self.headset_active = active
-
-    if active is True:
-      self._emit("headset_activated")
-    elif active is False and previous_active is True:
-      self._emit("headset_deactivated")
-
-    self._state_changed(headset_active=active)
-
-  def set_battery(self, percentage):
-    if percentage not in (0, 25, 50, 75, 100):
-      return
-
-    with self._state_lock:
-      if self.headset_dongle_connected is not True:
-        return
-
-      if self.battery == percentage:
-        return
-
-      self.battery = percentage
-
-    self._state_changed(battery=percentage)
-
-  # ------------------------------------------------------------------
-  # Shared HID interface management
-  # ------------------------------------------------------------------
-
-  def _open_devices(self):
-    protocol = self.protocol
-    devices = []
-
-    device_infos = [
-      info for info in hid.enumerate()
-      if info["vendor_id"] == protocol.USB_VENDOR_ID
-      and info["product_id"] == protocol.USB_PRODUCT_ID
-      and info["interface_number"] == protocol.RADIO_INTERFACE_NUMBER
-    ]
-
-    for info in device_infos:
-      if self._stop_event.is_set():
-        break
-
-      device = None
-
-      try:
-        device = hid.device()
-        device.open_path(info["path"])
-        device.set_nonblocking(1)
-        devices.append(device)
-
-      except Exception as exc:
-        if device is not None:
-          try:
-            device.close()
-          except Exception:
-            pass
-
-        self._close_devices(devices)
-        raise RuntimeError(
-          f"Failed to open radio HID interface: {exc}"
-        ) from exc
-
-    return devices
-
-  def _close_devices(self, devices):
-    for device in devices:
-      try:
-        device.close()
-      except Exception:
-        pass
-
-  # ------------------------------------------------------------------
-  # Shared HID polling
-  # ------------------------------------------------------------------
-
-  def _send_poll_commands(self, device):
-    protocol = self.protocol
-
-    for command_bytes, prepend_report_id in protocol.HID_POLL_COMMANDS:
-      if self._stop_event.is_set():
-        return False
-
-      if len(command_bytes) > protocol.HID_REPORT_SIZE:
-        self._emit(
-          "error",
-          message="HID command exceeds the configured report size.",
-        )
-        return False
-
-      packet = list(command_bytes)
-      packet.extend(
-        [0x00] * (protocol.HID_REPORT_SIZE - len(packet))
-      )
-
-      if prepend_report_id:
-        packet = [0x00] + packet[:protocol.HID_REPORT_SIZE - 1]
-
-      try:
-        device.write(packet)
-      except Exception as exc:
-        if self._stop_event.is_set():
-          return False
-
-        self._emit(
-          "error",
-          message=f"Failed to send HID command: {exc}",
-        )
-        return False
-
-    return True
-
-  def _process_report(self, report_data):
-    protocol = self.protocol
-
-    if not report_data or len(report_data) <= 1:
-      return
-
-    raw_report_hex = bytes(report_data).hex(" ")
-
-    if raw_report_hex != self._last_raw_report_hex:
-      self._last_raw_report_hex = raw_report_hex
-
-    on_prefixes = protocol.HEADSET_ON_REPORT_PREFIXES
-    on_index = protocol.HEADSET_ON_VALUE_BYTE_INDEX
-
-    if (
-      len(report_data) > on_index
-      and any(
-        tuple(report_data[:len(prefix)]) == prefix
-        for prefix in on_prefixes
-      )
-      and report_data[on_index] == protocol.HEADSET_ON_VALUE
-    ):
-      self.set_headset_connected(True)
-
-    off_prefixes = protocol.HEADSET_OFF_REPORT_PREFIXES
-    marker_index = protocol.HEADSET_OFF_MARKER_INDEX
-    marker = protocol.HEADSET_OFF_MARKER
-
-    if (
-      len(report_data) >= marker_index + len(marker)
-      and any(
-        tuple(report_data[:len(prefix)]) == prefix
-        for prefix in off_prefixes
-      )
-      and tuple(
-        report_data[marker_index:marker_index + len(marker)]
-      ) == marker
-    ):
-      self.set_headset_connected(False)
-
-    # Battery parsing is temporarily disabled until the report format
-    # has been verified. Keep this code for future reactivation.
-    #
-    # battery_prefix = protocol.BATTERY_REPORT_PREFIX
-    # battery_index = protocol.BATTERY_VALUE_BYTE_INDEX
-    #
-    # if (
-    #   len(report_data) > battery_index
-    #   and tuple(report_data[:len(battery_prefix)]) == battery_prefix
-    # ):
-    #   battery_value = protocol.BATTERY_VALUE_MAP.get(
-    #     report_data[battery_index]
-    #   )
-    #
-    #   if battery_value is not None:
-    #     self.set_battery(battery_value)
-
-  def _poll_devices(self, devices):
-    protocol = self.protocol
-
-    for device in devices:
-      if self._stop_event.is_set():
-        return False
-
-      if not self._send_poll_commands(device):
-        return False
-
-      if self._stop_event.wait(
-        protocol.HID_COMMAND_INTERVAL_SECONDS
-      ):
-        return False
-
-      if self._stop_event.is_set():
-        return False
-
-      try:
-        report_data = device.read(protocol.HID_REPORT_SIZE)
-      except Exception as exc:
-        if self._stop_event.is_set():
-          return False
-
-        self._emit(
-          "error",
-          message=f"Failed to read HID report: {exc}",
-        )
-        return False
-
-      if self._stop_event.is_set():
-        return False
-
-      self._process_report(report_data)
-
-    return True
-
-  # ------------------------------------------------------------------
-  # Thread lifecycle and reconnection
-  # ------------------------------------------------------------------
-
-  def stop(self):
-    """Request a graceful stop without changing the reported device state."""
-    self._stop_event.set()
-
-  def run(self):
-    protocol = self.protocol
+import time
+
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
+
+from connection_manager import ConnectionManager
+from device_profile import load_device_profile
+
+
+logger = logging.getLogger(__name__)
+
+_STOP_SENTINEL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceState:
+  dongle_connected: bool = False
+  headset_on: str | None = None
+  usb_connected: bool = False
+  battery_level: int | None = None
+  battery_status: str | None = None
+  mixdial_game: int | None = None
+  mixdial_chat: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceEvent:
+  event_type: str
+  data: Mapping[str, Any]
+
+
+class ArctisDevice:
+  def __init__(
+    self,
+    profile: str,
+    on_event: Callable[[DeviceEvent], None] | None = None,
+  ):
+    self._config = load_device_profile(profile)
+    self._message_queue = queue.Queue()
+    self._on_event = on_event
+    self._state = DeviceState()
+    self._mixdial_debounce = 0.1
+    self._pending_mixdial: dict[str, tuple[int, float]] = {}
+    self._reported_battery_status = None
+    self._stop_lock = threading.Lock()
+    self._stopped = False
+
+    self._consumer_thread = threading.Thread(
+      target=self._consume_messages,
+      name="ArctisDeviceConsumer",
+      daemon=True,
+    )
+
+    self._consumer_thread.start()
 
     try:
-      while not self._stop_event.is_set():
-        devices = []
+      self._connection_manager = ConnectionManager(
+        self._config,
+        self._message_queue,
+      )
+      self._connection_manager.start()
+    except Exception:
+      self._message_queue.put(_STOP_SENTINEL)
+      self._consumer_thread.join()
+      raise
 
-        try:
-          devices = self._open_devices()
+  @property
+  def state(self) -> DeviceState:
+    return self._state
 
-          if self._stop_event.is_set():
-            break
+  def stop(self) -> None:
+    with self._stop_lock:
+      if self._stopped:
+        return
 
-          radio_connected = bool(devices)
-          radio_status = (len(devices), radio_connected)
+      self._stopped = True
 
-          if radio_status != self._last_radio_status:
-            if radio_connected:
-              print(
-                f"[HID] Interfaces abiertas: {len(devices)}; "
-                "receptor detectado: True"
-              )
-            else:
-              print(
-                "[HID] Buscando interfaces de radio... "
-                "Interfaces abiertas: 0; receptor detectado: False"
-              )
+      try:
+        self._connection_manager.stop()
+      finally:
+        self._message_queue.put(_STOP_SENTINEL)
+        self._consumer_thread.join()
 
-            self._last_radio_status = radio_status
+  def _consume_messages(self) -> None:
+    while True:
+      timeout = self._next_mixdial_timeout()
 
-          self.set_dongle_connected(radio_connected)
+      try:
+        message = self._message_queue.get(timeout=timeout)
+      except queue.Empty:
+        self._flush_pending_mixdial()
+        continue
 
-          if radio_connected:
-            while not self._stop_event.is_set():
-              if not self._poll_devices(devices):
-                break
+      if message is _STOP_SENTINEL:
+        return
 
-              if self._stop_event.wait(
-                protocol.HID_POLL_INTERVAL_SECONDS
-              ):
-                break
+      try:
+        self._process_message(message)
+      except Exception:
+        logger.exception(
+          "Failed to process Arctis device message"
+        )
 
-        except Exception as exc:
-          if not self._stop_event.is_set():
-            self._emit(
-              "error",
-              message=f"Error in HID monitor: {exc}",
-            )
+  def _next_mixdial_timeout(self) -> float | None:
+    if not self._pending_mixdial:
+      return None
 
-        finally:
-          self._close_devices(devices)
+    next_deadline = min(
+      deadline
+      for _, deadline in self._pending_mixdial.values()
+    )
 
-        if self._stop_event.wait(
-          protocol.USB_RECONNECT_INTERVAL_SECONDS
-        ):
-          break
+    return max(0.0, next_deadline - time.monotonic())
 
-    finally:
-      self._emit("stopped")
+  def _flush_pending_mixdial(self) -> None:
+    now = time.monotonic()
+
+    updates = {
+      field: value
+      for field, (value, deadline) in self._pending_mixdial.items()
+      if deadline <= now
+    }
+
+    if not updates:
+      return
+
+    for field in updates:
+      self._pending_mixdial.pop(field)
+
+    previous_state = self._state
+    new_state = replace(previous_state, **updates)
+
+    if new_state != previous_state:
+      self._state = new_state
+      self._emit_status_events(
+        previous_state,
+        new_state,
+      )
+
+  def _process_message(
+    self,
+    message: Mapping[str, Any],
+  ) -> None:
+    status = message.get("status", {})
+    actions = message.get("actions", [])
+
+    if not hasattr(self, "_pending_mixdial"):
+      self._pending_mixdial = {}
+
+    if not hasattr(self, "_mixdial_debounce"):
+      self._mixdial_debounce = 0.1
+
+    if not isinstance(status, Mapping):
+      logger.warning("Ignoring invalid device status payload")
+      status = {}
+
+    if not isinstance(actions, (list, tuple)):
+      logger.warning("Ignoring invalid device actions payload")
+      actions = []
+
+    normalized_status = dict(status)
+
+    if "headset_usb_connected" in normalized_status:
+      physical_usb = normalized_status.pop(
+        "headset_usb_connected"
+      )
+
+      if isinstance(physical_usb, bool):
+        normalized_status["usb_connected"] = physical_usb
+      else:
+        logger.warning(
+          "Ignoring invalid headset_usb_connected value: %r",
+          physical_usb,
+        )
+
+    if "headset" in normalized_status:
+      headset = normalized_status.pop("headset")
+
+      if headset in ("on", "off"):
+        normalized_status["headset_on"] = headset
+      else:
+        logger.warning(
+          "Ignoring invalid headset value: %r",
+          headset,
+        )
+
+    if "usb" in normalized_status:
+      usb = normalized_status.pop("usb")
+
+      if usb == "connected":
+        normalized_status["usb_connected"] = True
+      elif usb == "disconnected":
+        normalized_status["usb_connected"] = False
+      else:
+        logger.warning(
+          "Ignoring invalid usb value: %r",
+          usb,
+        )
+
+    valid_fields = set(DeviceState.__dataclass_fields__)
+
+    unknown_fields = normalized_status.keys() - valid_fields
+
+    if unknown_fields:
+      logger.warning(
+        "Ignoring unknown device status fields: %s",
+        sorted(unknown_fields),
+      )
+
+    updates = {
+      field: value
+      for field, value in normalized_status.items()
+      if field in valid_fields
+    }
+
+    mixdial_updates = {}
+
+    for field in ("mixdial_game", "mixdial_chat"):
+      if field in updates:
+        mixdial_updates[field] = updates.pop(field)
+
+    previous_state = self._state
+
+    usb_connected = updates.get(
+      "usb_connected",
+      previous_state.usb_connected,
+    )
+
+    if usb_connected is True:
+      mixdial_updates.clear()
+      self._pending_mixdial.clear()
+
+
+    new_state = replace(previous_state, **updates)
+
+    # Headset information is unavailable without the wireless dongle.
+    # USB-C connection remains independent and can still be detected.
+    dongle_disconnected = (
+      previous_state.dongle_connected
+      and not new_state.dongle_connected
+    )
+
+    if dongle_disconnected:
+      new_state = replace(
+        new_state,
+        headset_on=None,
+        battery_level=None,
+        battery_status=None,
+        mixdial_game=None,
+        mixdial_chat=None,
+      )
+
+    if dongle_disconnected:
+      self._pending_mixdial.clear()
+    else:
+      now = time.monotonic()
+
+      for field, value in mixdial_updates.items():
+        if value == getattr(previous_state, field):
+          self._pending_mixdial.pop(field, None)
+        else:
+          self._pending_mixdial[field] = (
+            value,
+            now + self._mixdial_debounce,
+          )
+
+    if "battery_status" in updates:
+      self._reported_battery_status = updates["battery_status"]
+
+    if updates.get("usb_connected") is False:
+      self._reported_battery_status = None
+
+    if dongle_disconnected:
+      self._reported_battery_status = None
+
+    new_state = replace(
+      new_state,
+      battery_status=self._resolve_battery_status(new_state),
+    )
+
+    if new_state != previous_state:
+      self._state = new_state
+      self._emit_status_events(
+        previous_state,
+        new_state,
+      )
+
+    for action in actions:
+      if isinstance(action, str):
+        self._emit_event(
+          "button_pressed",
+          {"button": action},
+        )
+      else:
+        logger.warning(
+          "Ignoring invalid device action: %r",
+          action,
+        )
+
+  def _resolve_battery_status(
+    self,
+    state: DeviceState,
+  ) -> str | None:
+    reported_status = getattr(
+      self,
+      "_reported_battery_status",
+      None,
+    )
+
+    if state.headset_on != "on":
+      return None
+
+    if reported_status == "charging":
+      return "charging"
+
+    if reported_status == "fully_charged":
+      return "fully_charged"
+
+    return "discharging"
+
+  def _emit_status_events(
+    self,
+    previous: DeviceState,
+    current: DeviceState,
+  ) -> None:
+    event_fields = (
+      ("dongle_connected", "dongle_connection_changed"),
+      ("headset_on", "headset_power_changed"),
+      ("usb_connected", "usb_connection_changed"),
+      ("battery_level", "battery_changed"),
+      ("battery_status", "battery_status_changed"),
+    )
+
+    for field, event_type in event_fields:
+      if getattr(previous, field) != getattr(current, field):
+        self._emit_event(
+          event_type,
+          {field: getattr(current, field)},
+        )
+
+    if (
+      previous.mixdial_game != current.mixdial_game
+      or previous.mixdial_chat != current.mixdial_chat
+    ):
+      self._emit_event(
+        "mixdial_changed",
+        {
+          "mixdial_game": current.mixdial_game,
+          "mixdial_chat": current.mixdial_chat,
+        },
+      )
+
+  def _emit_event(
+    self,
+    event_type: str,
+    data: Mapping[str, Any],
+  ) -> None:
+    callback = getattr(self, "_on_event", None)
+
+    if callback is None:
+      return
+
+    event = DeviceEvent(
+      event_type=event_type,
+      data=MappingProxyType(dict(data)),
+    )
+
+    try:
+      callback(event)
+    except Exception:
+      logger.exception(
+        "Arctis device event callback failed: %s",
+        event_type,
+      )

@@ -1,0 +1,177 @@
+device:
+  name: SteelSeries Arctis 7+
+  vendor_id: 0x1038
+  dongle_id: 0x220e # Arctis 7+ wireless dongle
+  headset_id: 0x220c # Arctis 7+ USB headset
+
+  # Untested dongle IDs:
+  # - 0x2212  # Arctis 7+ PS5
+  # - 0x2216  # Arctis 7+ Xbox
+  # - 0x2236  # Arctis 7+ Destiny
+
+  hid:
+    read_timeout_ms: 50
+    reconnect_interval: 2
+    retry_interval_ms: 250
+    retry_window: 3
+
+  interfaces:
+    3:
+      mode: polling
+
+      config:
+        usage_page: 0xffc0
+        usage: 0x0001
+        report_size: 64
+        endpoint_in: 0x84
+
+        polling:
+          refresh_interval: 300
+          transition_interval: 0.5
+          transition_timeout: 30
+          commands:
+            status:
+              transport: ctrl_output
+              min_command_interval_ms: 50
+
+              request:
+                report_id: 0x00
+                report_length: 64
+                payload: [0xb0]
+
+              response:
+                prefix: [0xb0]
+
+      headset:
+        offset: 1
+        values:
+          on: 0x03
+          off: 0x01
+
+      battery:
+        level:
+          offset: 2
+          min: 0x01
+          max: 0x04
+
+        status:
+          offset: 3
+          values:
+            charging: 0x01
+            fully_charged: 0x02
+            not_charging: 0x03
+
+      mixdial:
+        game:
+          offset: 4
+          min: 0
+          max: 100
+
+        chat:
+          offset: 5
+          min: 0
+          max: 100
+
+      # Battery:
+      # - 0x02, 0x03 and 0x04 have been correlated with
+      #   SteelSeries GG battery levels.
+      # - 0x00 and 0x01 have been observed or allowed, but
+      #   their exact meaning has not been established.
+      #
+      # Charging status:
+      # - 0x01: charging observed.
+      # - 0x02: fully charged; GG displays "Charged".
+      # - 0x03: not charging observed.
+      # - 0x00: observed with the headset powered off and USB-C connected;
+      #   exact meaning unknown.
+
+    4:
+      mode: passive
+
+      config:
+        usage_page: 0x000c
+        usage: 0x0001
+        report_size: 4
+        endpoint_in: 0x85
+
+      button:
+        single:
+          report: [0x00, 0x02, 0x00, 0x00]
+          action: single
+
+        double:
+          report: [0x00, 0x04, 0x00, 0x00]
+          action: double
+
+        triple:
+          report: [0x00, 0x01, 0x00, 0x00]
+          action: triple
+
+        release_report: [0x00, 0x00, 0x00, 0x00]
+
+    5:
+      mode: passive
+
+      config:
+        usage_page: 0xff00
+        usage: 0x0001
+        report_size: 64
+        endpoint_in: 0x86
+
+      mixdial:
+        prefix: [0x45]
+        min_length: 3
+
+        game:
+          offset: 1
+          min: 0
+          max: 100
+
+        chat:
+          offset: 2
+          min: 0
+          max: 100
+
+      battery:
+        prefix: [0xb7]
+        min_length: 2
+
+        level:
+          offset: 1
+          min: 0x01
+          max: 0x04
+
+      headset:
+        prefix: [0xb9]
+        min_length: 2
+        offset: 1
+        values:
+          on: 0x03
+          off: 0x01
+
+      usb:
+        prefix: [0xbb]
+        min_length: 2
+        offset: 1
+        values:
+          connected: 0x01
+          disconnected: 0x03
+
+      # Battery:
+      # - B7 02, B7 03 and B7 04 have been captured.
+      # - These values correlate with IF3 readings and GG battery levels.
+      # - Notification frequency and triggering conditions are unknown.
+      #
+      # Headset power:
+      # - B9 03: headset powered on.
+      # - B9 01: headset powered off.
+      #
+      # USB:
+      # - BB 01: USB-C connected.
+      # - BB 03: USB-C disconnected.
+      # - BB 00: observed once; exact meaning unknown.
+      #
+      # Mixdial:
+      # - Game/chat values range from 0 to 100.
+      # - Changes during USB connection tests without physical dial
+      #   interaction have been observed; cause unknown.
