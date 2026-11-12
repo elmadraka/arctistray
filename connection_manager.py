@@ -20,6 +20,12 @@ from hid_worker import (
   WorkerMessageType,
 )
 
+from pnp_worker import (
+  PnPWorker,
+  PnPWorkerMessage,
+  PnPWorkerMessageType,
+)
+
 logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +48,15 @@ class InterfaceRuntime:
   next_retry_at: float | None = None
   worker_closing: bool = False
 
+@dataclass
+class PnPRuntime:
+  status: str = "waiting"
+  worker: PnPWorker | None = None
+  session_id: int = 0
+  hid_path: bytes | None = None
+  worker_closing: bool = False
+  resolved: bool = False
+  next_retry_at: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryResult:
@@ -340,11 +355,14 @@ class ConnectionManager:
     self._shutdown_error = None
 
     self._worker_id_counter = 0
+    self._pnp_worker_id_counter = 0
 
     self._interfaces = {
       interface_id: InterfaceRuntime()
       for interface_id in config.interfaces
     }
+
+    self._pnp = PnPRuntime()
 
     self._state = self._build_state()
 
@@ -420,12 +438,20 @@ class ConnectionManager:
         for runtime in self._interfaces.values():
           runtime.next_retry_at = retry_at
 
+        self._pnp.next_retry_at = retry_at
+
       if self._stop_requested.is_set():
         return
 
       if discovery is not None:
         self._dongle_connected = discovery.dongle_connected
         self._headset_usb_connected = discovery.headset_usb_connected
+
+        if discovery.dongle_connected:
+          try:
+            self._start_pnp_worker(discovery)
+          except Exception:
+            logger.exception("Failed to start PnP worker.")
 
         retry_interfaces = (
           discovery.unavailable_interfaces
@@ -479,6 +505,10 @@ class ConnectionManager:
           if self._status != "stopping":
             self._handle_worker_message(event)
 
+        elif isinstance(event, PnPWorkerMessage):
+          if self._status != "stopping":
+            self._handle_pnp_worker_message(event)
+
         self._process_due_retries()
 
     except Exception:
@@ -501,6 +531,7 @@ class ConnectionManager:
         else:
           self._notifications = None
 
+      self._stop_pnp_worker()
       workers = []
 
       for runtime in self._interfaces.values():
@@ -558,6 +589,34 @@ class ConnectionManager:
         runtime.next_retry_at = None
         runtime.path = None
         runtime.status = "waiting"
+
+      pnp_worker = self._pnp.worker
+
+      if pnp_worker is not None:
+        try:
+          pnp_worker.join()
+
+        except Exception as error:
+          logger.exception(
+            "Failed to join PnP worker %s.",
+            pnp_worker.worker_id,
+          )
+
+          try:
+            if pnp_worker.is_alive() and shutdown_error is None:
+              shutdown_error = error
+          except Exception:
+            logger.exception(
+              "Failed to check PnP worker %s state.",
+              pnp_worker.worker_id,
+            )
+
+            if shutdown_error is None:
+              shutdown_error = error
+
+        else:
+          self._pnp.worker = None
+          self._pnp.worker_closing = False
 
       self._shutdown_error = shutdown_error
       self._status = (
@@ -687,6 +746,93 @@ class ConnectionManager:
       interface_id,
     )
 
+  def _start_pnp_worker(self, discovery):
+    if not discovery.dongle_connected:
+      return
+
+    if (
+      self._pnp.worker is not None
+      or self._pnp.worker_closing
+      or self._pnp.resolved
+    ):
+      return
+
+    if not discovery.interface_paths:
+      logger.warning(
+        "Cannot start PnP worker: no HID interface is available."
+      )
+
+      self._pnp.status = "unavailable"
+      self._pnp.next_retry_at = (
+        time.monotonic() + self.RETRY_INTERVAL
+      )
+      return
+
+    interface_id, hid_path = next(
+      iter(discovery.interface_paths.items())
+    )
+
+    self._pnp_worker_id_counter += 1
+    self._pnp.session_id += 1
+    self._pnp.hid_path = hid_path
+    self._pnp.next_retry_at = None
+    self._pnp.status = "resolving"
+
+    try:
+      worker = PnPWorker(
+        worker_id=self._pnp_worker_id_counter,
+        session_id=self._pnp.session_id,
+        hid_path=hid_path,
+        message_queue=self._events,
+      )
+
+      self._pnp.worker = worker
+      worker.start()
+
+    except Exception:
+      self._pnp.worker = None
+      self._pnp.status = "unavailable"
+      self._pnp.hid_path = None
+      self._pnp.next_retry_at = (
+        time.monotonic() + self.RETRY_INTERVAL
+      )
+      raise
+
+    logger.info(
+      "Started PnP worker %s using HID interface %s.",
+      worker.worker_id,
+      interface_id,
+    )
+
+  def _stop_pnp_worker(self):
+    runtime = self._pnp
+
+    # Invalidate the current session immediately.
+    runtime.session_id += 1
+    runtime.resolved = False
+    runtime.hid_path = None
+    runtime.next_retry_at = None
+    runtime.status = "waiting"
+
+    worker = runtime.worker
+
+    if worker is None:
+      runtime.worker_closing = False
+      return
+
+    if runtime.worker_closing:
+      return
+
+    runtime.worker_closing = True
+
+    try:
+      worker.stop()
+    except Exception:
+      logger.exception(
+        "Failed to stop PnP worker %s.",
+        worker.worker_id,
+      )
+
   def _update_fast_polling(self):
     should_fast_poll = (
       self._dongle_connected
@@ -793,6 +939,8 @@ class ConnectionManager:
       for runtime in self._interfaces.values():
         runtime.next_retry_at = retry_at
 
+      self._pnp.next_retry_at = retry_at
+
       return
     
     self._dongle_connected = discovery.dongle_connected
@@ -803,6 +951,8 @@ class ConnectionManager:
     )
 
     if not discovery.dongle_connected:
+      self._stop_pnp_worker()
+
       for runtime in self._interfaces.values():
         runtime.path = None
         runtime.next_retry_at = None
@@ -826,6 +976,11 @@ class ConnectionManager:
       self._publish_device_status()
       self._publish_state()
       return
+
+    try:
+      self._start_pnp_worker(discovery)
+    except Exception:
+      logger.exception("Failed to start PnP worker after device notification.")
 
     for interface_id, runtime in self._interfaces.items():
       path = discovery.interface_paths.get(interface_id)
@@ -1023,12 +1178,111 @@ class ConnectionManager:
 
       self._publish_state()
 
+  def _handle_pnp_worker_message(
+    self,
+    message: PnPWorkerMessage,
+  ):
+    runtime = self._pnp
+    worker = runtime.worker
+
+    if worker is None or worker.worker_id != message.worker_id:
+      return
+
+    if (
+      message.message_type != PnPWorkerMessageType.TERMINATED
+      and runtime.session_id != message.session_id
+    ):
+      return
+
+    if message.message_type == PnPWorkerMessageType.RESULT:
+      if runtime.worker_closing:
+        return
+
+      if not isinstance(message.payload, Mapping):
+        logger.error("PnP worker returned an invalid result.")
+        runtime.status = "unavailable"
+        return
+
+      status = message.payload.get("status")
+
+      if not isinstance(status, Mapping):
+        logger.error("PnP worker result has no valid status.")
+        runtime.status = "unavailable"
+        return
+
+      pnp_device = status.get("pnp_device")
+
+      if not isinstance(pnp_device, Mapping):
+        logger.error("PnP worker result has no valid pnp_device.")
+        runtime.status = "unavailable"
+        return
+
+      runtime.resolved = True
+      runtime.status = "available"
+
+      self._device_message_queue.put(message.payload)
+
+      logger.info("PnP device identity resolved successfully.")
+      return
+
+    if message.message_type == PnPWorkerMessageType.ERROR:
+      if runtime.worker_closing:
+        return
+
+      runtime.status = "unavailable"
+
+      logger.error(
+        "PnP worker %s failed: %s",
+        message.worker_id,
+        message.payload,
+      )
+      return
+
+    if message.message_type == PnPWorkerMessageType.TERMINATED:
+      try:
+        worker.join()
+      except Exception:
+        logger.exception(
+          "Failed to join PnP worker %s.",
+          message.worker_id,
+        )
+
+        try:
+          if worker.is_alive():
+            return
+        except Exception:
+          logger.exception(
+            "Failed to check PnP worker %s state.",
+            message.worker_id,
+          )
+          return
+
+      runtime.worker = None
+      runtime.worker_closing = False
+
+      if runtime.resolved:
+        runtime.status = "available"
+        runtime.next_retry_at = None
+      elif self._dongle_connected:
+        runtime.status = "unavailable"
+        runtime.next_retry_at = (
+          time.monotonic() + self.RETRY_INTERVAL
+        )
+      else:
+        runtime.status = "waiting"
+        runtime.next_retry_at = None
+
+      logger.debug("PnP worker %s terminated.", message.worker_id)
+
   def _get_next_retry_timeout(self):
     retry_times = [
       runtime.next_retry_at
       for runtime in self._interfaces.values()
       if runtime.next_retry_at is not None
     ]
+
+    if self._pnp.next_retry_at is not None:
+      retry_times.append(self._pnp.next_retry_at)
 
     if not retry_times:
       return None
@@ -1047,7 +1301,12 @@ class ConnectionManager:
       )
     ]
 
-    if not due_interfaces:
+    pnp_retry_due = (
+      self._pnp.next_retry_at is not None
+      and self._pnp.next_retry_at <= now
+    )
+
+    if not due_interfaces and not pnp_retry_due:
       return
 
     try:
@@ -1063,6 +1322,11 @@ class ConnectionManager:
         runtime = self._interfaces[interface_id]
         runtime.next_retry_at = retry_at
 
+      if pnp_retry_due:
+        self._pnp.next_retry_at = (
+          time.monotonic() + self.RETRY_INTERVAL
+        )
+
       return
 
     if self._stop_requested.is_set():
@@ -1074,6 +1338,8 @@ class ConnectionManager:
     )
 
     if not discovery.dongle_connected:
+      self._stop_pnp_worker()
+
       for interface_id, runtime in self._interfaces.items():
         runtime.next_retry_at = None
         runtime.path = None
@@ -1095,6 +1361,16 @@ class ConnectionManager:
       self._publish_device_status()
       self._publish_state()
       return
+
+    if pnp_retry_due:
+      self._pnp.next_retry_at = None
+
+      try:
+        self._start_pnp_worker(discovery)
+      except Exception:
+        logger.exception(
+          "Failed to restart PnP worker during retry processing."
+        )
 
     for interface_id in due_interfaces:
       if self._stop_requested.is_set():

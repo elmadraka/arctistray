@@ -1,6 +1,6 @@
 import threading
 import queue
-
+import time
 import pytest
 
 import connection_manager
@@ -677,6 +677,38 @@ class FakeWorker:
   def stop(self):
     self.stopped = True
 
+class FakePnPWorker:
+  def __init__(
+    self,
+    worker_id,
+    session_id,
+    hid_path,
+    message_queue,
+  ):
+    self.worker_id = worker_id
+    self.session_id = session_id
+    self.hid_path = hid_path
+    self.message_queue = message_queue
+
+    self.started = False
+    self.stopped = False
+    self.joined = False
+    self.alive = False
+
+  def start(self):
+    self.started = True
+    self.alive = True
+
+  def stop(self):
+    self.stopped = True
+
+  def join(self):
+    self.joined = True
+    self.alive = False
+
+  def is_alive(self):
+    return self.alive
+
 class TestWorkerLifecycle:
   def test_start_worker(self, config, monkeypatch):
     monkeypatch.setattr(
@@ -738,6 +770,11 @@ class TestWorkerLifecycle:
     )
     monkeypatch.setattr(
       connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+    monkeypatch.setattr(
+      connection_manager,
       "HidDeviceNotifications",
       FakeNotifications,
     )
@@ -771,6 +808,14 @@ class TestWorkerLifecycle:
 
     try:
       assert manager._thread is not None
+
+      deadline = time.monotonic() + 2
+
+      while (
+        manager._worker_id_counter < len(config.interfaces)
+        and time.monotonic() < deadline
+      ):
+        threading.Event().wait(0.01)
 
       assert manager._worker_id_counter == len(config.interfaces)
 
@@ -4522,3 +4567,342 @@ class TestDeviceStatusIntegration:
     assert runtime.next_retry_at == 100.0 + manager.RETRY_INTERVAL
 
 # END TestDeviceStatusIntegration
+
+class TestConnectionManagerPnP:
+  def test_start_pnp_worker_uses_first_available_hid_interface(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+
+    paths = {
+      5: b"interface-5",
+      4: b"interface-4",
+      3: b"interface-3",
+    }
+
+    manager = make_manager(config)
+    discovery = make_discovery(config, paths)
+
+    manager._start_pnp_worker(discovery)
+
+    runtime = manager._pnp
+    worker = runtime.worker
+
+    assert isinstance(worker, FakePnPWorker)
+    assert worker.started is True
+    assert worker.hid_path == b"interface-5"
+    assert worker.session_id == runtime.session_id
+    assert worker.message_queue is manager._events
+
+    assert runtime.hid_path == b"interface-5"
+    assert runtime.status == "resolving"
+    assert runtime.next_retry_at is None
+    assert runtime.resolved is False
+
+  def test_start_pnp_worker_does_not_create_duplicates(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+
+    manager = make_manager(config)
+    discovery = make_discovery(
+      config,
+      {3: b"interface-3"},
+    )
+
+    manager._start_pnp_worker(discovery)
+
+    worker = manager._pnp.worker
+    session_id = manager._pnp.session_id
+
+    manager._start_pnp_worker(discovery)
+
+    assert manager._pnp.worker is worker
+    assert manager._pnp.session_id == session_id
+    assert worker.started is True
+
+  def test_start_pnp_worker_without_available_interfaces_schedules_retry(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager.time,
+      "monotonic",
+      lambda: 100.0,
+    )
+
+    manager = make_manager(config)
+    discovery = make_discovery(config, {})
+
+    manager._start_pnp_worker(discovery)
+
+    assert manager._pnp.worker is None
+    assert manager._pnp.status == "unavailable"
+    assert manager._pnp.hid_path is None
+    assert manager._pnp.next_retry_at == (
+      100.0 + manager.RETRY_INTERVAL
+    )
+
+  def test_pnp_result_is_stored_and_published(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+
+    manager = make_manager(config)
+    discovery = make_discovery(
+      config,
+      {3: b"interface-3"},
+    )
+
+    manager._dongle_connected = True
+    manager._start_pnp_worker(discovery)
+
+    worker = manager._pnp.worker
+
+    payload = {
+      "status": {
+        "pnp_device": {
+          "container_id": "{TEST-CONTAINER}",
+          "device_instance_id": "USB\\VID_1038&PID_220E",
+          "audio_render_instance_id": "render-instance",
+          "audio_capture_instance_id": "capture-instance",
+        },
+      },
+    }
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=worker.session_id,
+        message_type=connection_manager.PnPWorkerMessageType.RESULT,
+        payload=payload,
+      )
+    )
+
+    assert manager._pnp.resolved is True
+    assert manager._pnp.status == "available"
+    assert manager._device_message_queue.get_nowait() == payload
+    assert manager._device_message_queue.empty()
+
+  def test_pnp_worker_ignores_result_from_old_session(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+
+    manager = make_manager(config)
+    discovery = make_discovery(
+      config,
+      {3: b"interface-3"},
+    )
+
+    manager._start_pnp_worker(discovery)
+
+    worker = manager._pnp.worker
+    manager._pnp.session_id += 1
+
+    payload = {
+      "status": {
+        "pnp_device": {
+          "container_id": "{OLD-CONTAINER}",
+        },
+      },
+    }
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=worker.session_id,
+        message_type=connection_manager.PnPWorkerMessageType.RESULT,
+        payload=payload,
+      )
+    )
+
+    assert manager._pnp.resolved is False
+    assert manager._pnp.status == "resolving"
+    assert manager._device_message_queue.empty()
+
+  def test_pnp_worker_error_schedules_retry_after_termination(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+    monkeypatch.setattr(
+      connection_manager.time,
+      "monotonic",
+      lambda: 100.0,
+    )
+
+    manager = make_manager(config)
+    manager._dongle_connected = True
+
+    manager._start_pnp_worker(
+      make_discovery(config, {3: b"interface-3"})
+    )
+
+    worker = manager._pnp.worker
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=worker.session_id,
+        message_type=connection_manager.PnPWorkerMessageType.ERROR,
+        payload="Simulated PnP failure",
+      )
+    )
+
+    assert manager._pnp.status == "unavailable"
+    assert manager._pnp.worker is worker
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=worker.session_id,
+        message_type=connection_manager.PnPWorkerMessageType.TERMINATED,
+      )
+    )
+
+    assert worker.joined is True
+    assert manager._pnp.worker is None
+    assert manager._pnp.status == "unavailable"
+    assert manager._pnp.next_retry_at == (
+      100.0 + manager.RETRY_INTERVAL
+    )
+
+  def test_pnp_disconnect_invalidates_session_and_stops_worker(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+
+    manager = make_manager(config)
+    manager._dongle_connected = True
+
+    manager._start_pnp_worker(
+      make_discovery(config, {3: b"interface-3"})
+    )
+
+    runtime = manager._pnp
+    worker = runtime.worker
+    old_session_id = runtime.session_id
+
+    manager._dongle_connected = False
+    manager._stop_pnp_worker()
+
+    assert worker.stopped is True
+    assert runtime.worker is worker
+    assert runtime.worker_closing is True
+    assert runtime.session_id > old_session_id
+    assert runtime.resolved is False
+    assert runtime.hid_path is None
+    assert runtime.next_retry_at is None
+    assert runtime.status == "waiting"
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=old_session_id,
+        message_type=connection_manager.PnPWorkerMessageType.RESULT,
+        payload={
+          "pnp_devices": {
+            "arctis_7_plus": {
+              "container_id": "{STALE-CONTAINER}",
+            },
+          },
+        },
+      )
+    )
+
+    assert runtime.resolved is False
+    assert manager._device_message_queue.empty()
+
+    manager._handle_pnp_worker_message(
+      connection_manager.PnPWorkerMessage(
+        worker_id=worker.worker_id,
+        session_id=old_session_id,
+        message_type=connection_manager.PnPWorkerMessageType.TERMINATED,
+      )
+    )
+
+    assert worker.joined is True
+    assert runtime.worker is None
+    assert runtime.worker_closing is False
+    assert runtime.status == "waiting"
+
+  def test_pnp_retry_starts_worker_again(
+    self,
+    config,
+    monkeypatch,
+  ):
+    monkeypatch.setattr(
+      connection_manager,
+      "PnPWorker",
+      FakePnPWorker,
+    )
+    monkeypatch.setattr(
+      connection_manager.time,
+      "monotonic",
+      lambda: 100.0,
+    )
+
+    manager = make_manager(config)
+    manager._dongle_connected = True
+    manager._pnp.next_retry_at = 100.0
+
+    discovery = make_discovery(
+      config,
+      {5: b"interface-5"},
+    )
+
+    monkeypatch.setattr(
+      manager,
+      "_discover_devices",
+      lambda: discovery,
+    )
+
+    manager._process_due_retries()
+
+    runtime = manager._pnp
+    worker = runtime.worker
+
+    assert isinstance(worker, FakePnPWorker)
+    assert worker.started is True
+    assert worker.hid_path == b"interface-5"
+    assert runtime.status == "resolving"
+    assert runtime.next_retry_at is None
+
+# END TestConnectionManagerPnP

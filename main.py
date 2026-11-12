@@ -1,4 +1,3 @@
-
 import argparse
 import queue
 import signal
@@ -8,9 +7,9 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from arctis_device import ArctisDevice
+from audio_controller import AudioController
 from device_profile import load_device_profile
 from tray_ui import TrayController
-
 
 def main():
   parser = argparse.ArgumentParser()
@@ -45,6 +44,15 @@ def main():
     "arctis_7_plus.yml",
     on_event=on_device_event,
   )
+  
+  audio_controller = AudioController(device)
+
+  try:
+    audio_controller.start()
+  except Exception:
+    audio_controller.stop()
+    device.stop()
+    raise
 
   controller.panel.update_device_state(
     profile.name,
@@ -71,7 +79,11 @@ def main():
   update_timer.timeout.connect(refresh_device_state)
   update_timer.start(50)
 
-  app.aboutToQuit.connect(device.stop)
+  def stop_components():
+    audio_controller.stop()
+    device.stop()
+
+  app.aboutToQuit.connect(stop_components)
 
   interrupt_requested = [False]
 

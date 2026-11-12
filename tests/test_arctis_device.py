@@ -43,6 +43,21 @@ def flush_pending_mixdial(device):
   time.sleep(0.11)
   device._flush_pending_mixdial()
 
+def create_device(state=None, on_event=None):
+  device = arctis_device.ArctisDevice.__new__(
+    arctis_device.ArctisDevice
+  )
+  device._state = (
+    state if state is not None else arctis_device.DeviceState()
+  )
+  device._on_event = on_event
+  device._listeners = []
+  device._listeners_lock = arctis_device.threading.RLock()
+  device._pending_mixdial = {}
+  device._mixdial_debounce = 0.1
+  device._reported_battery_status = None
+  return device
+
 # ============================================================
 # TestInitialization
 # ============================================================
@@ -419,9 +434,7 @@ class TestInitializationFailures:
 
 class TestState:
   def test_initial_state_contains_unknown_device_values(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
 
     device._state = arctis_device.DeviceState()
 
@@ -436,9 +449,7 @@ class TestState:
     )
 
   def test_status_message_updates_only_received_fields(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState(
       dongle_connected=True,
       headset_on="on",
@@ -472,9 +483,7 @@ class TestState:
     assert device.state is not previous_state
 
   def test_status_message_preserves_fields_not_received(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState(
       dongle_connected=True,
       headset_on="on",
@@ -501,9 +510,7 @@ class TestState:
     assert device.state.mixdial_chat == 20
 
   def test_status_message_can_clear_existing_value(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState(
       dongle_connected=True,
       battery_level=3,
@@ -519,9 +526,7 @@ class TestState:
     assert device.state.dongle_connected is True
 
   def test_status_message_with_unchanged_values_preserves_state(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState(
       dongle_connected=True,
       headset_on="on",
@@ -560,9 +565,7 @@ class TestState:
     physical_usb,
     expected_usb,
   ):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState()
 
     device._process_message({
@@ -590,9 +593,7 @@ class TestState:
     expected_field,
     expected_value,
   ):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState()
 
     device._process_message({
@@ -604,6 +605,96 @@ class TestState:
     assert getattr(device.state, expected_field) == expected_value
 
 
+  def test_pnp_device_starts_as_none(self):
+    device = create_device()
+    device._state = arctis_device.DeviceState()
+
+    assert device.state.pnp_device is None
+
+  def test_pnp_device_status_updates_state(self):
+    device = create_device()
+    device._state = arctis_device.DeviceState(
+      dongle_connected=True,
+    )
+
+    device._process_message({
+      "status": {
+        "pnp_device": {
+          "audio_render_instance_id": "SWD\\MMDEVAPI\\RENDER",
+          "audio_capture_instance_id": "SWD\\MMDEVAPI\\CAPTURE",
+        },
+      },
+    })
+
+    assert isinstance(
+      device.state.pnp_device,
+      arctis_device.PnPDeviceState,
+    )
+    assert device.state.pnp_device == (
+      arctis_device.PnPDeviceState(
+        audio_render_instance_id="SWD\\MMDEVAPI\\RENDER",
+        audio_capture_instance_id="SWD\\MMDEVAPI\\CAPTURE",
+      )
+    )
+
+  def test_pnp_device_allows_missing_audio_endpoints(self):
+    device = create_device()
+    device._state = arctis_device.DeviceState(
+      dongle_connected=True,
+    )
+
+    device._process_message({
+      "status": {
+        "pnp_device": {
+          "audio_render_instance_id": None,
+          "audio_capture_instance_id": None,
+        },
+      },
+    })
+
+    assert device.state.pnp_device is not None
+    assert device.state.pnp_device.audio_render_instance_id is None
+    assert device.state.pnp_device.audio_capture_instance_id is None
+
+  def test_missing_pnp_device_field_preserves_existing_state(self):
+    device = create_device()
+    device._state = arctis_device.DeviceState(
+      pnp_device=arctis_device.PnPDeviceState(
+        audio_render_instance_id=None,
+        audio_capture_instance_id=None,
+      ),
+    )
+
+    previous_pnp_device = device.state.pnp_device
+
+    device._process_message({
+      "status": {
+        "battery_level": 3,
+      },
+    })
+
+    assert device.state.pnp_device is previous_pnp_device
+
+  def test_invalid_pnp_device_value_preserves_existing_state(self):
+    device = create_device()
+    device._state = arctis_device.DeviceState(
+      pnp_device=arctis_device.PnPDeviceState(
+        audio_render_instance_id=None,
+        audio_capture_instance_id=None,
+      ),
+    )
+
+    previous_pnp_device = device.state.pnp_device
+
+    device._process_message({
+      "status": {
+        "pnp_device": "invalid",
+      },
+    })
+
+    assert device.state.pnp_device is previous_pnp_device
+
+
 # END TestState
 
 # ============================================================
@@ -612,11 +703,10 @@ class TestState:
 class TestEvents:
   def test_dongle_connection_change_emits_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -632,11 +722,10 @@ class TestEvents:
 
   def test_headset_power_change_emits_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -657,11 +746,10 @@ class TestEvents:
 
   def test_usb_connection_change_emits_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -677,11 +765,10 @@ class TestEvents:
 
   def test_battery_level_change_emits_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -697,14 +784,12 @@ class TestEvents:
 
   def test_battery_status_change_emits_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        headset_on="on",
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      headset_on="on",
-    )
-    device._reported_battery_status = None
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -720,16 +805,15 @@ class TestEvents:
 
   def test_usb_disconnect_changes_battery_status_to_discharging(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
-    device._state = arctis_device.DeviceState(
-      headset_on="on",
-      usb_connected=True,
-      battery_status="charging",
+    device = create_device(
+      state=arctis_device.DeviceState(
+        headset_on="on",
+        usb_connected=True,
+        battery_status="charging",
+      ),
+      on_event=events.append,
     )
     device._reported_battery_status = "charging"
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -753,14 +837,13 @@ class TestEvents:
 
   def test_game_mix_change_emits_both_mix_values(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        mixdial_game=50,
+        mixdial_chat=50,
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      mixdial_game=50,
-      mixdial_chat=50,
-    )
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -778,14 +861,13 @@ class TestEvents:
 
   def test_chat_mix_change_emits_both_mix_values(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        mixdial_game=50,
+        mixdial_chat=50,
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      mixdial_game=50,
-      mixdial_chat=50,
-    )
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -803,11 +885,10 @@ class TestEvents:
 
   def test_mixdial_change_includes_unknown_value(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -824,11 +905,10 @@ class TestEvents:
 
   def test_button_action_emits_button_pressed_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "actions": ["button_single"],
@@ -842,11 +922,10 @@ class TestEvents:
 
   def test_button_double_action_emits_button_pressed_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "actions": ["button_double"],
@@ -860,11 +939,10 @@ class TestEvents:
 
   def test_button_triple_action_emits_button_pressed_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "actions": ["button_triple"],
@@ -878,15 +956,14 @@ class TestEvents:
 
   def test_unchanged_status_values_do_not_emit_events(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        dongle_connected=True,
+        headset_on="on",
+        battery_level=3,
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      dongle_connected=True,
-      headset_on="on",
-      battery_level=3,
-    )
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -902,11 +979,10 @@ class TestEvents:
 
   def test_event_data_is_immutable(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -919,21 +995,19 @@ class TestEvents:
 
   def test_multiple_status_changes_emit_separate_events(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        dongle_connected=False,
+        headset_on="off",
+        usb_connected=False,
+        battery_level=2,
+        battery_status=None,
+        mixdial_game=50,
+        mixdial_chat=50,
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      dongle_connected=False,
-      headset_on="off",
-      usb_connected=False,
-      battery_level=2,
-      battery_status=None,
-      mixdial_game=50,
-      mixdial_chat=50,
-    )
-
     device._reported_battery_status = "not_charging"
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -977,9 +1051,7 @@ class TestEvents:
 
   def test_all_events_are_emitted_after_state_update(self):
     observed_states = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState(
       headset_on="on",
       battery_level=2,
@@ -1007,9 +1079,7 @@ class TestEvents:
     )
 
   def test_state_updates_without_event_callback(self):
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
-    )
+    device = create_device()
     device._state = arctis_device.DeviceState()
     device._on_event = None
 
@@ -1023,11 +1093,10 @@ class TestEvents:
 
   def test_physical_usb_connection_emits_semantic_event(self):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState()
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -1079,15 +1148,14 @@ class TestEvents:
     event_data,
   ):
     events = []
-    device = arctis_device.ArctisDevice.__new__(
-      arctis_device.ArctisDevice
+    device = create_device(
+      state=arctis_device.DeviceState(
+        usb_connected=(
+          field == "usb" and value == "disconnected"
+        )
+      ),
+      on_event=events.append,
     )
-    device._state = arctis_device.DeviceState(
-      usb_connected=(
-        field == "usb" and value == "disconnected"
-      )
-    )
-    device._on_event = events.append
 
     device._process_message({
       "status": {
@@ -1109,6 +1177,187 @@ class TestEvents:
     assert events[0].event_type == event_type
     assert dict(events[0].data) == event_data
 
+
+  def test_pnp_device_lifecycle_emits_semantic_events(self):
+    events = []
+    device = create_device(
+      state=arctis_device.DeviceState(
+        dongle_connected=True,
+      ),
+      on_event=events.append,
+    )
+
+    first_device = {
+      "audio_render_instance_id": "SWD\\RENDER",
+      "audio_capture_instance_id": "SWD\\CAPTURE",
+    }
+
+    changed_device = {
+      "audio_render_instance_id": "SWD\\RENDER-NEW",
+      "audio_capture_instance_id": "SWD\\CAPTURE",
+    }
+
+    device._process_message({
+      "status": {
+        "pnp_device": first_device,
+      },
+    })
+
+    device._process_message({
+      "status": {
+        "pnp_device": first_device,
+      },
+    })
+
+    device._process_message({
+      "status": {
+        "pnp_device": changed_device,
+      },
+    })
+
+    device._process_message({
+      "status": {
+        "pnp_device": None,
+      },
+    })
+
+    assert [
+      event.event_type
+      for event in events
+    ] == [
+      "pnp_device_connected",
+      "pnp_device_changed",
+      "pnp_device_disconnected",
+    ]
+
+    assert events[0].data["pnp_device"] == (
+      arctis_device.PnPDeviceState(**first_device)
+    )
+    assert events[1].data["pnp_device"] == (
+      arctis_device.PnPDeviceState(**changed_device)
+    )
+    assert events[2].data["pnp_device"] is None
+
+  def test_dongle_disconnect_clears_pnp_device(self):
+    events = []
+    device = create_device(
+      state=arctis_device.DeviceState(
+        dongle_connected=True,
+        pnp_device=arctis_device.PnPDeviceState(
+          audio_render_instance_id="SWD\\RENDER",
+          audio_capture_instance_id="SWD\\CAPTURE",
+        ),
+      ),
+      on_event=events.append,
+    )
+
+    device._process_message({
+      "status": {
+        "dongle_connected": False,
+      },
+    })
+
+    assert device.state.pnp_device is None
+
+    pnp_events = [
+      event
+      for event in events
+      if event.event_type == "pnp_device_disconnected"
+    ]
+
+    assert len(pnp_events) == 1
+    assert pnp_events[0].data["pnp_device"] is None
+    assert pnp_events[0].state.pnp_device is None
+
+  def test_event_contains_immutable_state_snapshot(self):
+    events = []
+    device = create_device(
+      state=arctis_device.DeviceState(
+        dongle_connected=True,
+      ),
+      on_event=events.append,
+    )
+
+    device._process_message({
+      "status": {
+        "pnp_device": {
+          "audio_render_instance_id": None,
+          "audio_capture_instance_id": None,
+        },
+      },
+    })
+
+    assert len(events) == 1
+
+    first_event = events[0]
+    first_snapshot = first_event.state
+
+    device._process_message({
+      "status": {
+        "pnp_device": {
+          "audio_render_instance_id": None,
+          "audio_capture_instance_id": None,
+        },
+      },
+    })
+
+    assert len(events) == 1
+    assert first_event.state is first_snapshot
+    assert device.state is first_snapshot
+    assert first_snapshot.pnp_device is not None
+
+    with pytest.raises(AttributeError):
+      first_snapshot.pnp_device.audio_render_instance_id = (
+        "MODIFIED"
+      )
+
+  def test_add_listener_receives_events(self):
+    events = []
+    device = create_device()
+
+    device.add_listener(events.append)
+
+    device._process_message({
+      "status": {
+        "dongle_connected": True,
+      },
+    })
+
+    assert len(events) == 1
+    assert events[0].event_type == "dongle_connection_changed"
+    assert events[0].data == {
+      "dongle_connected": True,
+    }
+
+  def test_remove_listener_stops_receiving_events(self):
+    events = []
+    device = create_device()
+
+    device.add_listener(events.append)
+    device.remove_listener(events.append)
+
+    device._process_message({
+      "status": {
+        "dongle_connected": True,
+      },
+    })
+
+    assert events == []
+
+  def test_add_listener_does_not_register_duplicate(self):
+    events = []
+    device = create_device()
+
+    device.add_listener(events.append)
+    device.add_listener(events.append)
+
+    device._process_message({
+      "status": {
+        "dongle_connected": True,
+      },
+    })
+
+    assert len(events) == 1
 
 # END TestEvents
 

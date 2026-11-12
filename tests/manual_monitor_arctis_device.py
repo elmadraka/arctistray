@@ -157,25 +157,52 @@ class ArctisDeviceMonitor:
       ("MD_C", state.mixdial_chat),
     ]
 
-    return "  ".join(
-      f"{name}: {value}"
-      for name, value in values
-    )
+    lines = [
+      "  ".join(
+        f"{name}: {value}"
+        for name, value in values
+      ),
+    ]
+
+    pnp = state.pnp_device
+
+    if pnp is None:
+      lines.append("PnP: WAITING")
+    else:
+      lines.extend([
+        "PnP: RESOLVED",
+        f"Render: {pnp.audio_render_instance_id or 'NONE'}",
+        f"Capture: {pnp.audio_capture_instance_id or 'NONE'}",
+      ])
+
+    return lines
 
   def _build_state_box(self, state, width):
-    content = self._format_state(state)
-
     if width < 4:
-      return [content[:width]]
+      return ["STATE"[:width]]
 
     inner_width = width - 2
+    content = self._format_state(state)
 
-    return [
+    lines = [
       "┌" + "─" * inner_width + "┐",
       "│" + " STATE".ljust(inner_width) + "│",
-      "│" + f" {content}"[:inner_width].ljust(inner_width) + "│",
-      "└" + "─" * inner_width + "┘",
     ]
+
+    for item in content:
+      chunks = [
+        item[index:index + inner_width - 1]
+        for index in range(0, len(item), inner_width - 1)
+      ]
+
+      for chunk in chunks:
+        lines.append(
+          "│" + f" {chunk}".ljust(inner_width) + "│"
+        )
+
+    lines.append("└" + "─" * inner_width + "┘")
+
+    return lines
 
   def initialize(self):
     info = self._get_console_info()

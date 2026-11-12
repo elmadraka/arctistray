@@ -27,13 +27,18 @@ class DeviceState:
   battery_status: str | None = None
   mixdial_game: int | None = None
   mixdial_chat: int | None = None
+  pnp_device: PnPDeviceState | None = None
 
+@dataclass(frozen=True, slots=True)
+class PnPDeviceState:
+  audio_render_instance_id: str | None = None
+  audio_capture_instance_id: str | None = None
 
 @dataclass(frozen=True, slots=True)
 class DeviceEvent:
   event_type: str
   data: Mapping[str, Any]
-
+  state: DeviceState
 
 class ArctisDevice:
   def __init__(
@@ -44,6 +49,8 @@ class ArctisDevice:
     self._config = load_device_profile(profile)
     self._message_queue = queue.Queue()
     self._on_event = on_event
+    self._listeners = []
+    self._listeners_lock = threading.RLock()
     self._state = DeviceState()
     self._mixdial_debounce = 0.1
     self._pending_mixdial: dict[str, tuple[int, float]] = {}
@@ -86,6 +93,20 @@ class ArctisDevice:
       finally:
         self._message_queue.put(_STOP_SENTINEL)
         self._consumer_thread.join()
+
+  def add_listener(self, callback: Callable[[DeviceEvent], None]) -> None:
+    if not callable(callback):
+      raise TypeError("callback must be callable")
+
+    with self._listeners_lock:
+      if callback not in self._listeners:
+        self._listeners.append(callback)
+
+
+  def remove_listener(self, callback: Callable[[DeviceEvent], None]) -> None:
+    with self._listeners_lock:
+      if callback in self._listeners:
+        self._listeners.remove(callback)
 
   def _consume_messages(self) -> None:
     while True:
@@ -166,6 +187,49 @@ class ArctisDevice:
 
     normalized_status = dict(status)
 
+    pnp_device_present = "pnp_device" in normalized_status
+    pnp_device_value = normalized_status.pop(
+      "pnp_device",
+      None,
+    )
+
+    pnp_device_update = None
+
+    if pnp_device_present:
+      if pnp_device_value is None:
+        pnp_device_update = None
+
+      elif isinstance(pnp_device_value, PnPDeviceState):
+        pnp_device_update = pnp_device_value
+
+      elif isinstance(pnp_device_value, Mapping):
+        fields = (
+          "audio_render_instance_id",
+          "audio_capture_instance_id",
+        )
+
+        values = {
+          field: pnp_device_value.get(field)
+          for field in fields
+        }
+
+        if all(
+          value is None or isinstance(value, str)
+          for value in values.values()
+        ):
+          pnp_device_update = PnPDeviceState(**values)
+        else:
+          logger.warning(
+            "Ignoring invalid PnP device values: %r",
+            pnp_device_value,
+          )
+
+      else:
+        logger.warning(
+          "Ignoring invalid PnP device value: %r",
+          pnp_device_value,
+        )
+
     if "headset_usb_connected" in normalized_status:
       physical_usb = normalized_status.pop(
         "headset_usb_connected"
@@ -232,6 +296,21 @@ class ArctisDevice:
       previous_state.usb_connected,
     )
 
+    dongle_connected = updates.get(
+      "dongle_connected",
+      previous_state.dongle_connected,
+    )
+
+    if pnp_device_present:
+      if pnp_device_value is None:
+        updates["pnp_device"] = None
+
+      elif (
+        pnp_device_update is not None
+        and dongle_connected
+      ):
+        updates["pnp_device"] = pnp_device_update
+
     if usb_connected is True:
       mixdial_updates.clear()
       self._pending_mixdial.clear()
@@ -254,6 +333,7 @@ class ArctisDevice:
         battery_status=None,
         mixdial_game=None,
         mixdial_chat=None,
+        pnp_device=None,
       )
 
     if dongle_disconnected:
@@ -356,25 +436,55 @@ class ArctisDevice:
         },
       )
 
+    previous_pnp = previous.pnp_device
+    current_pnp = current.pnp_device
+
+    if previous_pnp is None and current_pnp is not None:
+      self._emit_event(
+        "pnp_device_connected",
+        {"pnp_device": current_pnp},
+      )
+
+    elif previous_pnp is not None and current_pnp is None:
+      self._emit_event(
+        "pnp_device_disconnected",
+        {"pnp_device": None},
+      )
+
+    elif (
+      previous_pnp is not None
+      and current_pnp is not None
+      and previous_pnp != current_pnp
+    ):
+      self._emit_event(
+        "pnp_device_changed",
+        {"pnp_device": current_pnp},
+      )
+
   def _emit_event(
     self,
     event_type: str,
     data: Mapping[str, Any],
   ) -> None:
-    callback = getattr(self, "_on_event", None)
-
-    if callback is None:
-      return
-
     event = DeviceEvent(
       event_type=event_type,
       data=MappingProxyType(dict(data)),
+      state=self._state,
     )
 
-    try:
-      callback(event)
-    except Exception:
-      logger.exception(
-        "Arctis device event callback failed: %s",
-        event_type,
-      )
+    callbacks = []
+
+    if self._on_event is not None:
+      callbacks.append(self._on_event)
+
+    with self._listeners_lock:
+      callbacks.extend(self._listeners)
+
+    for callback in callbacks:
+      try:
+        callback(event)
+      except Exception:
+        logger.exception(
+          "Arctis device event callback failed: %s",
+          event_type,
+        )
